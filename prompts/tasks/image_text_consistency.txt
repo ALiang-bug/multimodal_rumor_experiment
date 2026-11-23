@@ -1,0 +1,9 @@
+Evaluate the relationship between the attached image and the fixed claim. Identify how the caption presents the image, what is visible, and what supplied evidence establishes about its origin.
+
+C1 (event alignment): require visible correspondence and a source, metadata or other corroboration tying this image to the specific claimed event. A scene of flooding alone cannot establish which flood it depicts.
+C2 (illustrative correspondence): identify the relevant topic or object and a positive cue of illustrative use, such as an explicit file-photo caption or documented layout context. An unverified event match is insufficient.
+C3 (event or context mismatch): identify the claim that presents the image as evidence of this event and the verified provenance that places it in a conflicting event, time, place or context. The same archival photo can support C2 when credited as an illustration and C3 when presented as today's scene and its earlier origin is verified.
+C4 (semantic contradiction): quote the visually testable statement and point to the image detail that directly contradicts it. For example, a claim about the color of a particular door can be contradicted by that clearly identifiable door. An object outside the frame or hidden from view supplies no contradiction.
+C5 (unrelated): with both inputs available, explain the absence of a meaningful event, thematic or illustrative relationship. Missing provenance alone is insufficient.
+
+For C3 versus C4, check provenance and visible contradiction separately for the same target. If both are established, flag both cues for human review. When the single label remains unresolved, return UNKNOWN and identify the overlap in unknown_reason. Never resolve overlap by label priority or by changing the target. If a possible metaphor, meme or missing context prevents a reliable C5 judgment, use UNKNOWN and specify the missing link.

@@ -1,0 +1,8 @@
+Verify the preparation-stage change for {{ task_id }}.
+Decision guide: {{ task_instructions }}
+Parent version: {{ parent_input_json }}
+Current version and verification evidence: {{ visible_input_json }}
+Intended change (verification only): {{ operation_target_json }}
+
+Compare the two versions. Identify the observable change, whether evidence establishes the intended false claim, and any side effects. The intended change alone does not establish success. Use the recorded provenance. For image changes inspect the actual parent and modified images. Use PASS only for a verified target, NEEDS_HUMAN for inadequate evidence, a failed goal or material side effects, and REJECT for an unusable asset.
+Response schema: {{ response_schema_json }}

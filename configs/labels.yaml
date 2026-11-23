@@ -1,0 +1,406 @@
+schema_version: "1.0.0"
+label_schema_version: "1.0.0"
+language: zh-CN
+definition_authorship: >-
+  类别名称按项目既定任务方案固定。说服策略九类和意图四类借鉴 MisVideoQA；
+  以下 minimum_evidence 与 boundary_notes 属于本项目的操作定义，
+  不表示原论文已给出这些细粒度边界。KE、ES、EF 的静态图文适配亦为本项目定义。
+
+global_rules:
+  target:
+    field: target_claim
+    rule: >-
+      每条标注必须绑定明确的目标主张及其文本位置。对同一目标、同一输入和同一证据快照判定；
+      一个样本存在多个相互独立主张时先建立分别标注的目标记录，保留相同的样本与事件组关系。
+      不通过临时更换目标主张消除标签冲突。
+  unknown:
+    code: UNKNOWN
+    exclusive: true
+    rule: >-
+      UNKNOWN 是具备该标签的任务唯一的兜底类别；表示在任务适用且输入完整的条件下，
+      可用证据不足以支持任一既定实质类别，或无法可靠区分类别。不得与任何实质标签同时输出。
+      text_reasoning 与 image_perception 不设 UNKNOWN，来源未核实必须修复制作记录或隔离样本。
+  applicability:
+    field: applicability
+    rule: >-
+      任务不适用通过流程字段记录，不新增 NONE、OTHER、N/A 或额外业务标签。
+      现实语境合理性不承担完整真伪二分类；已核实且不存在目标错误机制的主张可标为任务不适用，
+      不为使其进入 KE、ES、EF 而强行制造错误归因。
+  system_failures:
+    rule: >-
+      缺失或损坏的图片、文件读写失败、模型超时、输出无法解析及模型未实际读取必要输入，
+      属于系统或数据完整性状态，必须重试、修复或隔离，不能自动转换为 UNKNOWN。
+  overlap:
+    rule: >-
+      单标签任务不得通过固定类别优先级掩盖交叠。先检查目标主张、证据范围和类别定义；
+      仍不能确定唯一主类别时提交人工审核，必要时以 UNKNOWN 结束。
+      多标签任务仅返回各自有证据支持的类别，禁止为追求标签覆盖率而补标签。
+  evidence:
+    rule: >-
+      minimum_evidence 规定的是支持条件而非模型自报置信度阈值。
+      证据应能追溯到输入文本片段、图片及区域、制作记录或冻结的外部证据条目；
+      模型记忆、看起来合理以及模型间相互同意均不能替代事实来源。
+  provenance:
+    rule: >-
+      OT、FT、OI、FI 为数据来源与制作状态标签，由 manifest 确认。
+      OT 和 OI 均不承诺内容真实；源数据中已有的谣言、编辑图或合成图仍属于本项目未改动的原始内容。
+      模型可指出记录与内容的疑点，但不能仅凭外观覆盖这些来源标签。
+
+tasks:
+  text_reasoning:
+    display_name_zh: 文本推理
+    cardinality: single
+    origin: manifest
+    labels:
+      - code: OT
+        name_zh: 原始文本
+        name_en: Original Text
+        definition: >-
+          来自基础数据集且未经过本项目语义篡改的文本。
+          保留原始字段与处理记录；不改变语义的编码或格式标准化不构成 FT。
+        minimum_evidence: >-
+          基础数据集记录标识、原始文本快照及哈希、可追溯的格式标准化日志；
+          制作记录确认本项目未实施语义篡改。
+        boundary_notes: >-
+          原始文本可以本来就含虚假陈述。OT 不等于真实、不等于人类原创，
+          也不能仅凭流畅度判定。来源不明时先修复来源记录，不新增兜底标签。
+      - code: FT
+        name_zh: 受控虚假篡改文本
+        name_en: Controlled False Text Alteration
+        definition: >-
+          以可追溯原始文本为基础，由本项目实施有明确目标的语义篡改，
+          且已通过证据确认篡改引入目标虚假陈述的文本。
+        minimum_evidence: >-
+          原始记录、修改前后文本、篡改位置、操作类型、制作日志，
+          以及确认目标虚假陈述成立的证据和有效性审核结果。
+        boundary_notes: >-
+          无害措辞改写、排版调整和意外事实纠正不能记作 FT。
+          仅执行生成操作但未证明篡改有效的候选不进入正式 FT 数据；
+          由 AI 生成不自动代表虚假。
+
+  image_perception:
+    display_name_zh: 图像感知
+    cardinality: single
+    origin: manifest
+    labels:
+      - code: OI
+        name_zh: 原始图片
+        name_en: Original Image
+        definition: >-
+          从基础数据集取得、未经过本项目语义篡改的图片。
+          为推理进行的尺寸适配或颜色格式转换另存派生文件并保留原始字节。
+        minimum_evidence: >-
+          基础数据集记录标识、原始图片文件与哈希、图片解码验证结果，
+          以及所有非语义预处理日志。
+        boundary_notes: >-
+          OI 可以是源数据集已有的编辑图、合成图、示意图或被错误配文的真图。
+          OI 不等于真实摄影，也不证明图中事件或其配文真实。
+      - code: FI
+        name_zh: 受控虚假篡改图片
+        name_en: Controlled False Image Alteration
+        definition: >-
+          以可追溯原始图片为基础，由本项目实施有明确目标的语义编辑，
+          并经审核确认该编辑引入预定虚假视觉内容或虚假视觉证据的图片。
+        minimum_evidence: >-
+          原图与输出图、文件哈希、操作日志、编辑区域或掩码（适用时）、目标变化描述，
+          以及篡改成功且形成目标虚假表达的审核证据。
+        boundary_notes: >-
+          缩放、格式转换和不改变含义的常规预处理不是 FI。
+          仅替换配文而未改图片字节或语义时，图片仍是 OI；
+          不能仅凭模型推测存在 AI 痕迹而赋予 FI。
+
+  reality_plausibility:
+    display_name_zh: 现实语境合理性
+    cardinality: single
+    origin: model
+    labels:
+      - code: KE
+        name_zh: 知识错误
+        name_en: Knowledge Error
+        definition: >-
+          目标主张对可核实知识、事实关系或已有信息作出错误解释，
+          该误解是目标主张产生误导的主要机制。
+        minimum_evidence: >-
+          目标陈述的精确位置、与之相关的可靠事实材料或可核查知识依据，
+          以及指出二者具体冲突的简短说明。
+        boundary_notes: >-
+          异常外观、罕见事件和常识性怀疑均不足以确证 KE。
+          涉及事实知识更新时记录时间范围。若主要机制是跨事件组合或事件凭空虚构，
+          应据证据分别考虑 ES 或 EF，不能仅按优先级强分。
+      - code: ES
+        name_zh: 事件拼接
+        name_en: Event Splicing
+        definition: >-
+          将属于不同真实事件、时间、地点或主体的素材绑定到同一目标叙事，
+          形成没有证据支持的事件联系。本项目将视频片段拼接概念适配为静态图文的跨事件组合。
+        minimum_evidence: >-
+          可追溯素材的真实出处或事件信息、文字声称的目标事件，
+          以及证明二者并非所声称同一事件或关联关系的证据。
+        boundary_notes: >-
+          主题相关但已明确标示为示意的图片不自动构成 ES。
+          仅知道图片与文字不一致、尚未核实各自事件来源时，不应推定存在两个真实事件。
+      - code: EF
+        name_zh: 事件伪造
+        name_en: Event Fabrication
+        definition: >-
+          目标叙事声称的核心事件被捏造，且可核查证据或已验证的制作记录支持该事件主张虚假，
+          而非仅仅对真实事件的背景解释有误。
+        minimum_evidence: >-
+          具体事件主张，以及可靠辟谣材料、直接冲突的事件记录，
+          或能证明目标事件虚构且经过审核的制作证据。
+        boundary_notes: >-
+          搜不到报道、图片看起来异常、模型不认识该事件，均不是充分的 EF 证据。
+          虚构作品或已明确说明的演示内容不得仅因非现实情节而判为误导性事件伪造。
+      - code: UNKNOWN
+        name_zh: 无法确定
+        name_en: Unknown
+        definition: >-
+          任务适用、输入完整，但当前证据不足以可靠确定 KE、ES、EF 中唯一的主要机制。
+        minimum_evidence: >-
+          记录已检查的证据范围、缺少的关键证据或无法消除的类别冲突，
+          并给出审核需要补充的信息。
+        boundary_notes: >-
+          不代表事件真实，也不代表已证实不存在错误。
+          已知任务不适用使用 applicability；来源缺失或系统失败使用对应流程状态。
+
+  image_text_consistency:
+    display_name_zh: 图文一致性
+    cardinality: single
+    origin: model
+    labels:
+      - code: C1
+        name_zh: 事件一致
+        name_en: Event Alignment
+        definition: >-
+          图片所呈现的事件与目标文字主张指向同一事件，
+          且判断所需的主体、时间、地点、行为等关键要素相符。
+        minimum_evidence: >-
+          图中相关内容与文字片段，以及能把图片绑定到目标事件的来源、元数据或其他佐证。
+        boundary_notes: >-
+          看起来相似或主题相同不足以证明同一事件。无需每个非关键细节都可见，
+          但不能对未呈现且无来源支持的关键要素作确定性推断。
+      - code: C2
+        name_zh: 示意对应
+        name_en: Illustrative Correspondence
+        definition: >-
+          图片用于说明目标主张涉及的主题、对象或概念，
+          并有依据表明它是示意素材，而非声称为目标事件的现场证据。
+        minimum_evidence: >-
+          可指出的主题或概念对应，以及配文标识、原始图注、来源说明或明确版式语境等示意性依据。
+        boundary_notes: >-
+          仅无法确认同事件不能自动降为 C2；必须有示意用途依据。
+          图像是否由 AI 生成不决定该关系类别。
+      - code: C3
+        name_zh: 事件或语境错配
+        name_en: Event or Context Mismatch
+        definition: >-
+          文字将图片当作目标事件或语境的证据，
+          但已核实的图片出处表明其属于另一事件、时间、地点或主体。
+        minimum_evidence: >-
+          文字对图片的事件绑定、图片真实来源或可核实背景，以及具体的错配证据。
+        boundary_notes: >-
+          不能仅凭未找到出处就判错配。C3 判断图文关系；ES 判断虚假叙事机制，
+          两任务可有联系但必须各自独立输出证据，不互相复制标签作为依据。
+      - code: C4
+        name_zh: 语义矛盾
+        name_en: Semantic Contradiction
+        definition: >-
+          图片清晰呈现的内容与目标文字中可由该图片检验的陈述直接冲突。
+        minimum_evidence: >-
+          矛盾的精确文字片段、对应可见图像区域或对象，以及冲突关系说明。
+        boundary_notes: >-
+          图片没有呈现某事不等于证明该事不存在。
+          若同一目标同时存在已证实的事件错配与直接视觉矛盾，提交审核以确定可解释的单一标签，
+          不按固定 C3 或 C4 优先级自动覆盖。
+      - code: C5
+        name_zh: 图文无关
+        name_en: Unrelated Image and Text
+        definition: >-
+          在完整可用的图文输入和目标主张范围内，图片与文字不存在可支持的主题、对象、事件或示意联系。
+        minimum_evidence: >-
+          图片主要内容和文字目标的简要描述，以及对可能关联进行检查后的无关性说明。
+        boundary_notes: >-
+          缺乏事件出处不等于图文无关；隐喻、梗图或特殊背景可能存在未识别关系，
+          无法可靠排除时用 UNKNOWN，而不是把不理解归为 C5。
+      - code: UNKNOWN
+        name_zh: 无法确定
+        name_en: Unknown
+        definition: >-
+          图文输入完整，但证据不足以可靠区分 C1 至 C5，或存在未能裁决的关系交叠。
+        minimum_evidence: >-
+          记录不确定的具体关系、已知事实以及缺少的事件出处、示意用途或其他关键材料。
+        boundary_notes: >-
+          不表示任何一方真实或虚假；不能代替缺图、解码错误和推理失败等系统状态。
+
+  persuasion_strategy:
+    display_name_zh: 说服策略
+    cardinality: multi
+    origin: model
+    labels:
+      - code: POLARIZATION
+        name_zh: 政治极化
+        name_en: Political Polarization
+        definition: >-
+          通过政治阵营的对立、敌我划分或身份冲突来引导立场和判断。
+        minimum_evidence: 能定位到政治群体划分、敌对描述或排斥性动员的文本或图像证据。
+        boundary_notes: >-
+          提到政治话题或人物本身不足以成立；必须存在对立强化。
+          这是项目操作定义，可与情感诉求或其他策略共现。
+      - code: AUTHORITY
+        name_zh: 诉诸权威
+        name_en: Appeal to Authority
+        definition: >-
+          借助专家、机构、身份、资历或权威符号的可信度来支持目标观点。
+        minimum_evidence: 被援引的权威线索，以及该线索如何被用于增强观点可信度的对应内容。
+        boundary_notes: >-
+          权威引用是否准确另行核查；不能把所有人物出现都视作权威诉求。
+          真实或伪造的权威身份都可能构成该策略。
+      - code: SOCIAL_PROOF
+        name_zh: 社会认同
+        name_en: Social Proof
+        definition: >-
+          利用多人相信、使用、见证或认可某观点的迹象来增强该观点的可信度。
+        minimum_evidence: 多人认同或见证线索，以及以其支持主张的文本或图像位置。
+        boundary_notes: >-
+          与从众效应的操作区分是以群体认同证明可信度，而非明确施加跟随行动压力。
+          同时存在两种证据时允许两个标签共现。
+      - code: STORYTELLING
+        name_zh: 故事叙述
+        name_en: Storytelling
+        definition: >-
+          通过人物、事件及时间或因果组织形成故事，以传递观点或促成认同。
+        minimum_evidence: 可定位的故事要素、叙事关系及其与目标观点之间的联系。
+        boundary_notes: >-
+          仅列事实或一句事件陈述不必然构成完整策略。
+          与叙事吸引可共现；本标签关注故事组织，后者关注维持注意和代入的手段。
+      - code: BANDWAGON
+        name_zh: 从众效应
+        name_en: Bandwagon Effect
+        definition: >-
+          以多数人已经参与、相信或选择为理由，促使受众跟随、加入或避免落后。
+        minimum_evidence: 群体流行性线索及要求或暗示受众跟随的行动压力。
+        boundary_notes: >-
+          单纯多人见证可能只是社会认同；需有跟随方向。
+          不以销量、人数等数字是否真实决定该策略是否存在。
+      - code: RHETORICAL_QUESTION
+        name_zh: 反问策略
+        name_en: Rhetorical Questioning
+        definition: >-
+          用包含预设立场或预期答案的问句强化结论、质疑对方或引导受众认同。
+        minimum_evidence: 具体问句及其上下文足以支持其反问功能的证据。
+        boundary_notes: >-
+          普通求知、信息征询和证据不足的问句不能仅凭问号归为反问。
+      - code: LOGICAL_REASONING
+        name_zh: 逻辑论证
+        name_en: Logical Reasoning
+        definition: >-
+          使用前提、证据、比较、因果或推导结构来支持结论。
+        minimum_evidence: 可明确指出的前提或证据、推导关系及所支持的结论。
+        boundary_notes: >-
+          本标签描述论证形式，不保证推导有效或前提真实。
+          错误论证仍可使用此策略；其事实与逻辑问题另由相关审核处理。
+      - code: NARRATIVE_ENGAGEMENT
+        name_zh: 叙事吸引
+        name_en: Narrative Engagement
+        definition: >-
+          使用悬念、代入、揭晓、情节推进等叙事手段吸引持续注意并引导观点接受。
+        minimum_evidence: 可定位的吸引注意或代入设计，以及它与叙事表达的联系。
+        boundary_notes: >-
+          故事存在不自动证明有额外吸引手段；普通标题或任意情绪词也不充分。
+          与故事叙述可共现；边界需在先导试标中验证。
+      - code: EMOTIONAL_APPEAL
+        name_zh: 情感诉求
+        name_en: Emotional Appeal
+        definition: >-
+          借助恐惧、愤怒、同情、希望等情绪线索影响受众的判断、态度或行为。
+        minimum_evidence: 明确情绪线索及其服务于观点接受或行动引导的对应关系。
+        boundary_notes: >-
+          情绪词的出现或事件本身令人难过，不自动说明表达在进行情感说服。
+          标注可观察策略，不推断每个受众实际产生了何种情绪。
+      - code: UNKNOWN
+        name_zh: 无法确定
+        name_en: Unknown
+        definition: >-
+          当前材料不能为九种已定义策略中的任一种提供充分支持，
+          或证据不足以可靠判断使用了何种策略。
+        minimum_evidence: 已检查的内容范围和无法支持既定策略的原因记录。
+        boundary_notes: >-
+          此类别为唯一兜底，不增设 NONE 或 OTHER；必须单独输出。
+          不能据此断言现实中绝对不存在任何说服策略。
+
+  intent_analysis:
+    display_name_zh: 意图分析
+    cardinality: single
+    origin: model
+    labels:
+      - code: PUBLIC_INTEREST
+        name_zh: 公共利益
+        name_en: Public Interest
+        definition: >-
+          内容中可观察到的主要传播目的指向公共告知、风险提醒、社会帮助或公共事务改善。
+        minimum_evidence: 明确的受益对象、告知或行动诉求，以及支持其为主要传播目的的上下文。
+        boundary_notes: >-
+          这是表现出的传播意图，不是对作者真实心理或信息正确性的认证。
+          不能仅因内容看起来有益就判定该类。
+      - code: ECONOMIC_INTEREST
+        name_zh: 经济利益
+        name_en: Economic Interest
+        definition: >-
+          内容中可观察到的主要传播目的指向销售、引流变现、付费、募资或其他经济回报。
+        minimum_evidence: 商品或服务推广、交易入口、明确获利诉求或其他直接经济动机线索。
+        boundary_notes: >-
+          讨论金钱、价格或经济新闻不等于追求经济利益。
+          不能因为帖子可能带来流量就默认其目的为变现。
+      - code: POLITICAL_INTEREST
+        name_zh: 政治利益
+        name_en: Political Interest
+        definition: >-
+          内容中可观察到的主要传播目的指向政治支持、政治动员、政策立场或政治主体的利益。
+        minimum_evidence: 明确政治主张、支持或反对的对象、政治行为引导及相关上下文。
+        boundary_notes: >-
+          单纯报道政治事件或出现政治人物不充分。
+          与政治极化属于不同任务：有政治意图不必然使用对立极化策略。
+      - code: PSYCHOLOGICAL_FULFILLMENT
+        name_zh: 心理满足
+        name_en: Psychological Fulfillment
+        definition: >-
+          内容中可观察到的主要传播目的指向娱乐、表达自我、寻求关注、认同或其他心理回报。
+        minimum_evidence: 明确的娱乐、自我表达、关注或认同诉求及其上下文支持。
+        boundary_notes: >-
+          不从作者身份或模型猜测推断潜在心理。
+          无经济或政治线索不等于自动属于心理满足；证据不足时选择 UNKNOWN。
+      - code: UNKNOWN
+        name_zh: 无法确定
+        name_en: Unknown
+        definition: >-
+          缺少足够的可观察传播线索，或多种意图并存且无法确定唯一主要意图。
+        minimum_evidence: 记录已识别线索、竞争性解释以及无法确定主要意图的原因。
+        boundary_notes: >-
+          不表示作者没有意图。该任务只标注有证据的表现性传播目的，
+          不将推断描述为已证实的内部动机。
+
+sources:
+  - id: misvideoqa_2026
+    title: "From Detection to Understanding Multi-Turn Reasoning for Video Misinformation Analysis"
+    url: "https://aclanthology.org/2026.acl-long.1716/"
+    pdf_url: "https://aclanthology.org/2026.acl-long.1716.pdf"
+    sections: ["3.2", "3.3", "B.1", "B.2"]
+    use: >-
+      说服策略与意图类别名称、KE ES EF 基础含义以及先归因再生成 QA 的方法启发；
+      项目静态图文适配与具体证据边界不应冒称为原文规则。
+  - id: ma_emnlp_2025
+    title: "Large Language Models Do Multi-Label Classification Differently"
+    url: "https://aclanthology.org/2025.emnlp-main.126/"
+    pdf_url: "https://aclanthology.org/2025.emnlp-main.126.pdf"
+    sections: ["5.2.2", "5.4", "7"]
+    use: >-
+      多标签生成与置信度解释的注意事项及可选逐标签实验启发；
+      不将其结论表述为已经验证本项目六任务独立 Prompt 的性能。
+  - id: mmclaims_2022
+    title: "MM-Claims A Dataset for Multimodal Claim Detection in Social Media"
+    url: "https://aclanthology.org/2022.findings-naacl.72/"
+    pdf_url: "https://aclanthology.org/2022.findings-naacl.72.pdf"
+    sections: ["3.4.2", "3.4.3"]
+    use: >-
+      标注指南、两轮试标、分歧讨论与指南修订的培训流程参考；
+      原文报告 Krippendorff alpha，一致性不等同事实正确率。

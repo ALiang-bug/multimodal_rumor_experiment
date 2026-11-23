@@ -1,0 +1,117 @@
+# 开发进度
+
+## 当前阶段
+
+实验设计与开发合同 1.0.0 已形成。M0 离线验收通过，真实模型预检与正式实验待开展。
+
+## 已有输入
+
+- 固定两个模型角色、六个独立任务及标签配置。
+- 完整流程、模型接入规范、数据结构、Prompt、合成夹具和验收标准。
+- 基于官方模型卡与论文原文的可核对依据。
+
+## 设计交付检查
+
+- Word 正式方案共 22 页，已逐页检查版面。
+- 包内 8 条合成记录通过 JSON Schema 和示例跨记录约束检查；1 个合成图像文件的实际字节哈希已核验。
+- 以上仅验证方案与开发示例，不代表 M0 实验管线已实现，也不代表任何模型或数据质量实验已通过。
+
+## 未运行项目
+
+- 未下载或部署两模型权重。
+- 未接入真实基础数据集或人工标注团队。
+- 未执行真实标注、Reviewer 质量评估或基准实验。
+
+## 下一轮任务
+
+按 AGENTS.md 实现 M0：建立 rumorlab 工程、依赖锁、配置与结构验证、generic_jsonl 适配器、SQLite 状态和 mock client；完成核心风险测试后记录实际命令、结果、代码版本和未解决问题。
+
+## 真实运行所需输入
+
+数据集名称与版本、图文路径、许可及源标签映射；两个模型端点或本地权重、immutable revision、运行环境与硬件；人工复核安排与经过试标冻结的标注手册。
+
+## 2026-11-22 启动阅读与 M0 实现顺序
+
+已按 AGENTS.md 的顺序读完 README、实验主规范、标签配置、记录 Schema、数据合同、实验与模型配置、Prompt 说明、模型接入和验收文档，最后核对本进度记录。输入为 1.0.0 版设计包，默认模式为 mock。本轮完成合同阅读和目录核对；尚未实现 rumorlab 或运行管线测试。上方示例检查结果来自设计包交付记录。
+
+1. 建立 rumorlab 包与 CLI 入口，锁定依赖，加载配置，核对六任务的标签枚举、Schema 结构与语义约束。
+2. 实现 generic_jsonl 导入，校验图像字节、目标文本区间、证据引用及来源谱系，按事件、素材、已确认重复及全部父项分组划分。
+3. 实现内容与输入哈希、版本依赖、SQLite 事务和追加事件，再验证缓存、租约恢复与上游变更后的下游失效。
+4. 按阶段构造白名单输入，用合成夹具和 mock 走通独立标注、审核、人工接口及基于已接受标签的 QA，按 T01–T12 验证各项离线行为并记录发布拦截原因。
+
+待配置项见上一节。另需在先导实验中校准近重复阈值、视觉与调用预算及审计方案。真实数据、端点和人工安排均不阻塞 M0。
+
+字段差异：docs/MODEL_SETUP.md 的最终回答说明写作 `evidence_refs`，Schema 的 annotation_payload、review_payload 和 qa_payload 均要求 `evidence_ids`。这影响响应模板与解析器的字段名；M0 按 Schema 校验，接入真实模型前需统一文档措辞。
+
+## M0 开发中
+
+- `python -m rumorlab preflight` 已加载固定模型和六任务配置。`python -m rumorlab validate-data` 已验证 8 条设计夹具记录及 1 个媒体文件。
+- `python -m rumorlab ingest --fixture --run-id m0-check` 已通过临时 SQLite 库验证首次导入和同快照重跑。SQLite 租约过期、旧租约拒绝提交和重启缓存命中已有单元测试。
+- 四个模型阶段已具备独立请求构造、字段白名单、实际图像字节绑定和本地 Schema 检查。脚本式 mock 支持正常 JSON、格式失败和超时输入。
+- 本机 Anaconda 的 SQLite 和 Pillow 测试通过临时注册本机包缓存 `D:\Anaconda\pkgs\*/Library/bin` 的 DLL 目录运行。已验证原始行导入、实际 PNG 解码、中文及补充平面字符跨度、原始真伪字段保留、幂等导入和绝对媒体路径拒绝。
+- 已用 `python -m rumorlab ingest --fixture --run-id m0-check --state-db <临时库>` 导入 8 条记录，再对同一临时库执行两次 `python -m rumorlab mock-run --run-id m0-check --state-db <临时库>`。首次按顺序执行四阶段，重跑四阶段全部命中缓存。使用 SQLite 缓存 DLL 的本地单元测试共 5 项通过。
+- 对同一合成快照执行 `python -m rumorlab group --run-id m0-group-check` 和两次 `python -m rumorlab split --run-id m0-group-check`。两个样本归入同一组并保留原 dev 划分，两次 split 返回相同冻结计划。单元测试共 6 项通过，新增用例覆盖同图、多父、已确认近重复的传递分组和跨划分拒绝。
+- 新增单选与多选的稳定选项映射及重复选项、非法答案检查。单元测试共 8 项通过。`python -m rumorlab release --check-only --records examples/records.jsonl` 返回预期退出码 1，逐条拒绝 8 条 mock 记录。正式数据的正向放行和各项拒绝分支仍需补充用例。
+- SQLite 新增按记录 ID 与内容哈希失效的机制，支持 `python -m rumorlab invalidate --record-id ... --content-hash ...`。含 supersedes_id 的新快照在导入事务内触发旧版本退役。单元测试覆盖传递失效、在途租约撤销、重启拒用旧版本及历史结果保留。
+- `python -m rumorlab export-snapshot --run-id <运行 ID>` 将已导入的快照输出为 JSONL，并投影退役后的状态。集成测试验证标签退役后，对应标签、审核和 QA 的投影均为 STALE，导出仍通过 Schema 校验，且发布门禁报告全部三个失效记录。本地单元测试共 10 项通过。
+- `mock-run --script <用例 JSONL>` 可处理多个样本、主张和内容任务。每行提供 `sample_id`、`claim_id`、`task_id` 以及以阶段名索引的 `responses`。缺失响应时报告 MISSING_SCRIPT 并继续其他用例。单元测试共 11 项通过，新增两个样本和两个不同任务的同批运行。
+- `mock-run --provenance` 新增基于来源记录的两个任务。测试从两个样本产生 OT、OI、FT、OI，重复执行命中缓存。候选状态为 VALIDATED，等待后续审核。来源真伪不参与该映射，声明 FI 但缺少已核验操作和父样本会报错。
+- mock 调度和快照导出均读取同一冻结划分计划。运行输出包含 split_manifest_id，工作项引用该计划的摘要。已有人工确认链接时应先运行 `split --confirmed-links <JSONL>`，否则首次 mock 运行按已知记录关系自动冻结。12 项测试通过，集成测试核对四阶段的划分依赖、导出分组及重启后的计划一致性。
+- mock 运行已生成运行清单、候选标签、QA 和审核合同记录，来源任务也导出候选标签。完整四阶段夹具输出经 JSON Schema 与跨记录引用校验通过，QA 独立通过审核后为 silver。验收仍需补齐 T01–T12 逐项证据，尤其是人工、抽检和发布分支。后续真实模型验证使用已说明的云服务器 A800 80 GB，权重和服务锁定信息待填。
+- T11 已验证分层抽样概率、逆概率加权混淆矩阵、实际人工路由率和自动通过残余错误率。六条合成用例含两种抽样概率，另验证只审核报警项时拒绝估计总体召回及自动通过残余错误。单元测试共 13 项通过。当前评估输出为点估计，正式放行所需组级区间仍待实现。
+- `import-human --run-id <运行 ID> --records <JSONL>` 事务性接收外部人审记录并随快照导出。合成测试覆盖批次回滚、旧哈希拒绝、同文件重跑和换 ID 重复投票。
+- 已接通确认式仲裁的 gold 状态。合成测试验证两票保持 silver、三票及合格的确认仲裁触发 gold、同样本 QA 仍需独立人审，导出结果通过合同校验。
+- `export-human --run-id <运行 ID> --guideline-version <版本> --target-id <记录 ID>` 导出匿名目标、经核验图像字节、可见材料及洗牌题目。省略目标选项时导出 HUMAN_PENDING 队列。盲审 QA 投票使用导出的 target_id，允许用 qa_answer.letters 提交显示选项，由导入器恢复稳定 ID。
+- 已接通纠正式仲裁。合成用例确认新 ID、新内容哈希、版本递增与旧 QA 失效，重复导入不会创建第二个版本。新版本仅在满足独立票数和仲裁条件时升为 gold。16 项单元测试通过。T01–T12 全量验收仍待补齐。
+
+### M0 验收覆盖
+
+使用本机 Anaconda 包缓存中的原生库运行 SQLite 和 Pillow 验证。
+
+| 检查 | 当前直接证据 | 尚待核验 |
+|---|---|---|
+| T01 | OT、OI、FT、缺谱系 FI 拒绝，带核验记录的合成 FI 输入按谱系映射 | 真实图像编辑与核验在后续实验开展 |
+| T02 | 六个任务模板逐一检查隐藏字段，Reviewer 候选隔离、盲审导出 | — |
+| T03 | UNKNOWN 混用、合法跳过、超时、坏 JSON 与失败事件 | — |
+| T04 | 无效证据引用直接失败，模拟缺证 EF 和 C1 均进入人工并停止出题 | — |
+| T05 | 同图、多父、近重复、同事件及 QA 引用造成的传递分组和划分冲突 | — |
+| T06 | 分别验证 Prompt、证据、图像字节、模型 revision、视觉配置和候选变化产生新请求键，已有重跑缓存测试 | — |
+| T07 | 重启、重投、技术与格式重试耗尽。QA 格式修复受专门配置限额控制。语义 rejection 只执行一次，保留 EXCLUDED 并停止自动生成 | — |
+| T08 | 单选与多选洗牌、未知与重复选项拒绝、显式答案标记拦截、盲审字母回流 | — |
+| T09 | 人工纠正和替代证据导入均使旧 QA 失效。证据更新使四阶段旧工作项全部成为 STALE，重跑拒绝使用旧依赖，原记录仍可查 | — |
+| T10 | 三票 gold 条件、同样本其他任务与 QA 不随标注升级、正式 test 拒绝 silver | — |
+| T11 | 不同概率、加权矩阵、报警限定样本拒绝估计 | 正式审计的组级区间 |
+| T12 | 内存模拟的合格训练快照通过门禁。覆盖 mock、STALE、许可不明、未解决、未知答案、跨划分及评测失败分母 | — |
+
+最新本地全套单元测试为 28 项通过。QA 预测按 qa_id 提供 status 与选项字母 letters。合成诊断用 `evaluate-qa --records <快照> --predictions <JSONL> --mock`。
+
+CPython 3.9 验证依赖已记录在 requirements-m0-py39.txt。执行 `python -m pip wheel --no-index --no-deps --no-build-isolation --wheel-dir runs/m0-wheel .` 成功构建 wheel。用临时 SQLite 库通过 CLI 预检、导入、划分、含来源任务的 mock 和导出，首次执行 8 个工作项，重跑 8 个全命中，17 条导出记录及 1 个媒体文件通过校验，且正式发布检查按预期返回 1。未在新环境重新安装锁定依赖。
+
+已在继承本机依赖的临时虚拟环境中离线安装 wheel。从项目目录之外运行安装后的 `rumorlab validate-data --config <绝对配置路径>`，通过 8 条记录与 1 个媒体文件的校验。
+
+M1 使用 A800 80 GB。仍需落实两模型权重或服务、不可变权重与 processor revision、chat template 哈希、后端及驱动版本、精度与视觉预算、真实数据路径与许可。使用预检验证同文异图、多图顺序以及最终 JSON 与 thinking 分离。人工参考集与组级置信区间在正式审计阶段核验。目前无真实模型或人工实验结果。
+
+## 2026-11-23 MMFakeBench 数据适配
+
+- 已添加 `python -m rumorlab ingest --adapter mmfakebench`。默认读取服务器上的官方 test JSON，按原真假和失真类别比例选 2,000 条，保留官方 test 划分和原始标签。标注源文件哈希、抽样种子、入选行和坏图隔离项随导入事务冻结。
+- 检查本地 MAR 的 MMFakeBench 衍生标注副本，仅用于验证字段兼容。其 `train_set.json` 实际对应官方 test 的 10,000 行，`test_set.json` 对应官方 val 的 1,000 行。两者的真实标签为字符串 `True`，适配器保留原值并与 `Real` 使用同一抽样层。服务器导入使用原始 JSON 和原图。
+- 按模块执行 `unittest` discovery，分别匹配 `test_mmfakebench.py` 与 `test_ingest.py`。本地进程注册 Anaconda 缓存的 `Library/bin` DLL 路径后共 4 项通过。覆盖分层配额、可复现来源 ID、原标签与文件路径的输入隔离、损坏图替补、抽样清单、重复导入、样本不足和路径越界。全套测试留到开发定稿。
+- 以 `python -` 独立调用 `prepare_mmfakebench`，从 10,000 条合成标注中按默认配置选中 2,000 个不同的样本 ID。合成四层计数分别为 600、600、600、200，全部保留 test 划分。
+- 上一轮云端文档记录的数据目录为 `/data/home/202422011133/MMFND/MAR_KDD/dataset/MMFakeBench`。本机无该目录的挂载和可用的服务器连接配置，尚未核验服务器原图或冻结真实 2,000 条清单。导入命令见 README。当前只执行了数据适配模块验证。
+
+### 当前数据划分决定
+
+- 默认使用官方 `val` 全量作为制作样本（官方 1,000 条，项目 `dev`），官方 `test` 10,000 条留作独立评测。这一决定替代上面的 2,000 条抽样方案。服务器运行使用 `mmfakebench-val` 批次。
+- 本轮只执行 `test_mmfakebench.py` 和 `test_ingest.py` 两个模块的 unittest discovery。本机加载 Anaconda 的 DLL 缓存后共 5 项通过，包括默认选择 val、导入全部合成 val 行并保留 dev 标记的回归检查。服务器真实 val 尚未导入。
+
+### 英文 Prompt 1.1.0
+
+标注与审核使用同一份英文任务卡。现实语境卡区分事实解释错误、跨事件绑定和核心事件虚构的证据要求。图文关系卡明确事件归属、示意用途与直接视觉冲突，要求重叠时保留原目标并提交复核。说服策略卡用短例对照群体背书与跟随压力、故事组织与吸引注意。仅运行 `python -m unittest discover -s tests -p test_requests.py -v`，6 项通过。真实标注效果待开发集人工试标验证。
+
+Prompt 1.1.1 已在四阶段渲染结果中核验系统角色声明，以及用户消息末尾的 JSON Schema 与请求校验 Schema 一致。重复上述模块测试，7 项通过。
+
+### M1 本地接入
+
+加入 vLLM 请求适配器以及按角色运行的真实端点探针。探针生成角色级模型锁，检查文本、单图变化、双图顺序、最终 JSON 和独立 reasoning 字段。运行 `python -m unittest discover -s tests -p test_vllm.py -v`，两项模块测试通过。服务器上的模型启动、图像预算和真实数据实验仍待终端实测。A800 服务与导入命令见 MODEL_SETUP.md。
+
+云端实验统一在 `/data/home/202422011133/MMFND` 下工作，模型存放在 `MMFND/models`。部署文档使用该目录获取和定位两个固定角色的精确权重 revision。

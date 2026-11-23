@@ -1,0 +1,118 @@
+# Specification configuration; clients and preflight are to be implemented.
+# Verified against official sources on 2026-11-22.
+schema_version: "1.0.0"
+execution:
+  mode: mock  # mock | real
+  allow_mock_without_model_weights: true
+  real_requires_preflight_lock: true
+  fail_on_missing_revision_or_backend_version: true
+  allow_silent_model_substitution: false
+  allow_serial_model_loading: true
+  conversation_scope: sample_task_stage
+  seed: 20261122
+  seed_guarantees_bitwise_determinism: false
+
+models:
+  annotator:
+    model_id: Qwen/Qwen3.8-27B
+    role: annotator
+    adapter: qwen_vllm
+    endpoint_env: ANNOTATOR_BASE_URL
+    token_env: ANNOTATOR_API_TOKEN
+    revision: null  # Resolve to an immutable model commit before any real call.
+    processor_revision: null  # Pin processor/tokenizer/template artifacts too.
+    backend: vllm
+    backend_version: null  # Freeze an actually tested build, not "latest".
+    precision: bf16  # Initial project choice; requires local capability check.
+    quantization: null
+    reasoning_parser: qwen3
+    input_modalities: [text, image]
+    output_modalities: [text]
+    generation:
+      thinking: true
+      chat_template_kwargs:
+        enable_thinking: true
+        preserve_thinking: false
+      temperature: 1.0
+      top_p: 0.95
+      top_k: 20
+      min_p: 0.0
+      presence_penalty: 0.0
+      repetition_penalty: 1.0
+      max_output_tokens: 8192  # Pilot starting budget, including thinking.
+    vision:
+      processor_policy: model_official
+      image_budget: null  # Resolve and freeze after multimodal preflight.
+      image_order: before_text
+    sources:
+      model_card: https://huggingface.co/Qwen/Qwen3.8-27B
+      serving_reference: https://recipes.vllm.ai/Qwen/Qwen3.8-27B
+
+  reviewer:
+    model_id: google/gemma-4-31B-it
+    role: reviewer
+    adapter: gemma_vllm
+    endpoint_env: REVIEWER_BASE_URL
+    token_env: REVIEWER_API_TOKEN
+    revision: null
+    processor_revision: null
+    backend: vllm
+    backend_version: null
+    precision: bf16
+    quantization: null
+    reasoning_parser: gemma4
+    input_modalities: [text, image]
+    output_modalities: [text]
+    generation:
+      thinking: true
+      chat_template_kwargs:
+        enable_thinking: true
+      temperature: 1.0
+      top_p: 0.95
+      top_k: 64
+      max_output_tokens: 8192
+    vision:
+      processor_policy: model_official
+      image_budget: null
+      image_order: before_text
+    sources:
+      model_card: https://huggingface.co/google/gemma-4-31B-it
+      official_docs: https://ai.google.dev/gemma/docs/core/model_card_4
+      serving_reference: https://gemma.ai/deployment/vllm/
+
+response_contract:
+  preferred_format: json_schema
+  validate_final_content_only: true
+  validate_against_local_schema: true
+  validate_evidence_and_label_semantics: true
+  persist_reasoning_in_public_dataset: false
+  max_retries: 2  # Two additional attempts; all attempts must remain auditable.
+  timeout_seconds: 180  # Pilot starting value; freeze after measurement.
+  truncated_output_is_failure: true
+  empty_final_content_is_failure: true
+  refuse_silent_parameter_drop: true
+
+preflight:
+  lock_file: runs/<run_id>/model_lock.json
+  required_lock_fields:
+    - model_id
+    - revision
+    - processor_revision
+    - backend_version
+    - chat_template_hash
+    - generation_config
+    - precision
+    - quantization
+    - vision_processor_config
+    - hardware_fingerprint
+    - dependency_lock_hash
+  required_checks:
+    - model_identity_and_license_snapshot
+    - text_input
+    - image_input_changes_response
+    - actual_max_image_count
+    - reasoning_final_content_separation
+    - json_schema_and_semantic_validation
+    - timeout_truncation_and_empty_response_handling
+    - image_resize_orientation_and_budget
+    - no_cross_sample_or_cross_task_history

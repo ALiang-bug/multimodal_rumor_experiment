@@ -1,0 +1,9 @@
+Review the candidate question for {{ task_id }}.
+Label inventory: {{ task_definition_json }}
+Decision guide: {{ task_instructions }}
+Solver-visible material: {{ solver_input_json }}
+Candidate and proposed key: {{ candidate_qa_json }}
+
+Determine which options the solver can support using the visible material, then compare them with the key. Check uniqueness for single choice, completeness for multiple choice, plausible distractors, neutral wording, answer leakage and availability of required images or evidence. Hidden history cannot support a solver answer. An uncertainty question must be answerable as such. Route unresolved annotation disputes for review.
+Use PASS for a sound question, NEEDS_HUMAN for missing information, disagreement or a repairable issue, and REJECT for an unusable question. Give a brief checkable reason and existing evidence IDs.
+Response schema: {{ response_schema_json }}

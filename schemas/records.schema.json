@@ -1,0 +1,3778 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.invalid/rumorlab/records.schema.json",
+  "title": "多模态谣言检测记录合同 1.0.0",
+  "description": "持久记录顶层 oneOf；annotation_payload/review_payload/qa_payload 用作模型响应，模型不能写 envelope。语义 payload 与语义 ID 不可变；只有语义变更新 ID 并用 supersedes_id 关联。status、quality_tier 与审核引用由 append-only job_event 及关联结果派生为 SQLite 投影；JSONL 是冻结时点快照，同一语义 ID 仅一行。通过审核更新投影而不更换语义 ID。外键、哈希、图像字节、人工资格与可见输入还需语义验证。本地 schema 标识不访问外网。",
+  "oneOf": [
+    {
+      "$ref": "#/$defs/sample"
+    },
+    {
+      "$ref": "#/$defs/evidence"
+    },
+    {
+      "$ref": "#/$defs/annotation"
+    },
+    {
+      "$ref": "#/$defs/review"
+    },
+    {
+      "$ref": "#/$defs/qa"
+    },
+    {
+      "$ref": "#/$defs/human_vote"
+    },
+    {
+      "$ref": "#/$defs/adjudication"
+    },
+    {
+      "$ref": "#/$defs/audit_selection"
+    },
+    {
+      "$ref": "#/$defs/run_manifest"
+    },
+    {
+      "$ref": "#/$defs/job_event"
+    }
+  ],
+  "$defs": {
+    "identifier": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 240,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:/-]*$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$",
+      "description": "小写 SHA-256。示例中的全零值仅是 is_mock=true 的显式占位；真实记录不允许占位。"
+    },
+    "version": {
+      "type": "string",
+      "minLength": 1
+    },
+    "task_id": {
+      "type": "string",
+      "enum": [
+        "text_reasoning",
+        "image_perception",
+        "reality_plausibility",
+        "image_text_consistency",
+        "persuasion_strategy",
+        "intent_analysis"
+      ]
+    },
+    "quality_tier": {
+      "enum": [
+        "unresolved",
+        "silver",
+        "gold"
+      ],
+      "description": "工作流派生的质量投影，不是模型返回字段。状态转换保留在只追加事件日志，冻结 JSONL 导出当前时点值。gold 的票数和审核要求还须满足实验配置。"
+    },
+    "annotation_status": {
+      "enum": [
+        "GENERATED",
+        "VALIDATED",
+        "REVIEWED",
+        "ACCEPTED_SILVER",
+        "HUMAN_PENDING",
+        "ACCEPTED_GOLD",
+        "EXCLUDED",
+        "SKIPPED",
+        "STALE"
+      ],
+      "description": "语义记录的当前工作流投影；转换追加 job_event。PASS 不生成新语义 ID。只有语义 payload 变更才生成新 ID 并建立 supersedes_id。"
+    },
+    "text_span": {
+      "type": "object",
+      "properties": {
+        "start": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "end": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "start",
+        "end"
+      ],
+      "additionalProperties": false,
+      "description": "Python Unicode 码点偏移，左闭右开 [start,end)。end>=start 及切片一致性由语义校验器检查。"
+    },
+    "target_claim": {
+      "type": "object",
+      "properties": {
+        "claim_id": {
+          "$ref": "#/$defs/identifier"
+        },
+        "text": {
+          "type": "string",
+          "minLength": 1
+        },
+        "text_span": {
+          "$ref": "#/$defs/text_span"
+        }
+      },
+      "required": [
+        "claim_id",
+        "text",
+        "text_span"
+      ],
+      "additionalProperties": false
+    },
+    "issue_code": {
+      "enum": [
+        "LABEL_ERROR",
+        "EVIDENCE_MISSING",
+        "EVIDENCE_UNSUPPORTED",
+        "CLAIM_AMBIGUOUS",
+        "APPLICABILITY_ERROR",
+        "MANIPULATION_FAILED",
+        "QA_MULTIPLE_ANSWERS",
+        "QA_WRONG_ANSWER",
+        "QA_DISTRACTOR_INVALID",
+        "QA_INPUT_INSUFFICIENT",
+        "ANSWER_LEAKAGE",
+        "FORMAT_ERROR",
+        "OTHER_QUALITY_ISSUE"
+      ]
+    },
+    "unknown_reason": {
+      "enum": [
+        null,
+        "evidence_insufficient",
+        "ambiguous_boundary",
+        "no_supported_category",
+        "multiple_plausible_categories"
+      ]
+    },
+    "producer": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "enum": [
+            "model",
+            "manifest",
+            "human",
+            "mock",
+            "system"
+          ]
+        },
+        "role": {
+          "enum": [
+            "annotator",
+            "reviewer",
+            "system",
+            "human"
+          ]
+        },
+        "model_id": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "model_revision": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "run_id": {
+          "$ref": "#/$defs/identifier"
+        },
+        "prompt_version": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/version"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "prompt_hash": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/sha256"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "kind",
+        "role",
+        "model_id",
+        "model_revision",
+        "run_id",
+        "prompt_version",
+        "prompt_hash"
+      ],
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "model"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "model_id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "model_revision": {
+                "type": "string",
+                "minLength": 1
+              },
+              "prompt_version": {
+                "type": "string",
+                "minLength": 1
+              },
+              "prompt_hash": {
+                "$ref": "#/$defs/sha256"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "annotation_payload": {
+      "type": "object",
+      "properties": {
+        "task_id": {
+          "$ref": "#/$defs/task_id"
+        },
+        "target_claim": {
+          "$ref": "#/$defs/target_claim"
+        },
+        "applicability": {
+          "enum": [
+            "applicable",
+            "not_applicable"
+          ]
+        },
+        "labels": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "uniqueItems": true,
+          "maxItems": 10
+        },
+        "rationale": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1800
+        },
+        "evidence_ids": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/identifier"
+          },
+          "minItems": 0,
+          "uniqueItems": true
+        },
+        "unknown_reason": {
+          "$ref": "#/$defs/unknown_reason"
+        }
+      },
+      "required": [
+        "task_id",
+        "target_claim",
+        "applicability",
+        "labels",
+        "rationale",
+        "evidence_ids",
+        "unknown_reason"
+      ],
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "task_id": {
+                "const": "text_reasoning"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "labels": {
+                "type": "array",
+                "items": {
+                  "enum": [
+                    "OT",
+                    "FT"
+                  ]
+                },
+                "uniqueItems": true,
+                "maxItems": 1
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "task_id": {
+                "const": "image_perception"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "labels": {
+                "type": "array",
+                "items": {
+                  "enum": [
+                    "OI",
+                    "FI"
+                  ]
+                },
+                "uniqueItems": true,
+                "maxItems": 1
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "task_id": {
+                "const": "reality_plausibility"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "labels": {
+                "type": "array",
+                "items": {
+                  "enum": [
+                    "KE",
+                    "ES",
+                    "EF",
+                    "UNKNOWN"
+                  ]
+                },
+                "uniqueItems": true,
+                "maxItems": 1
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "task_id": {
+                "const": "image_text_consistency"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "labels": {
+                "type": "array",
+                "items": {
+                  "enum": [
+                    "C1",
+                    "C2",
+                    "C3",
+                    "C4",
+                    "C5",
+                    "UNKNOWN"
+                  ]
+                },
+                "uniqueItems": true,
+                "maxItems": 1
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "task_id": {
+                "const": "persuasion_strategy"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "labels": {
+                "type": "array",
+                "items": {
+                  "enum": [
+                    "POLARIZATION",
+                    "AUTHORITY",
+                    "SOCIAL_PROOF",
+                    "STORYTELLING",
+                    "BANDWAGON",
+                    "RHETORICAL_QUESTION",
+                    "LOGICAL_REASONING",
+                    "NARRATIVE_ENGAGEMENT",
+                    "EMOTIONAL_APPEAL",
+                    "UNKNOWN"
+                  ]
+                },
+                "uniqueItems": true,
+                "maxItems": 10
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "task_id": {
+                "const": "intent_analysis"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "labels": {
+                "type": "array",
+                "items": {
+                  "enum": [
+                    "PUBLIC_INTEREST",
+                    "ECONOMIC_INTEREST",
+                    "POLITICAL_INTEREST",
+                    "PSYCHOLOGICAL_FULFILLMENT",
+                    "UNKNOWN"
+                  ]
+                },
+                "uniqueItems": true,
+                "maxItems": 1
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "labels": {
+                "contains": {
+                  "const": "UNKNOWN"
+                }
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "labels": {
+                "maxItems": 1
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "applicability": {
+                "const": "not_applicable"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "labels": {
+                "maxItems": 0
+              },
+              "unknown_reason": {
+                "type": "null"
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "labels": {
+                "minItems": 1
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "labels": {
+                "contains": {
+                  "const": "UNKNOWN"
+                }
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "unknown_reason": {
+                "type": "string"
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "unknown_reason": {
+                "type": "null"
+              }
+            }
+          }
+        }
+      ],
+      "description": "模型最终回答或制作记录映射的语义结果；不包含 ID、版本、模型身份、quality_tier、人审结论或执行状态。必要输入缺失或技术失败不生成此 payload。"
+    },
+    "review_payload": {
+      "type": "object",
+      "properties": {
+        "decision": {
+          "enum": [
+            "PASS",
+            "NEEDS_HUMAN",
+            "REJECT"
+          ]
+        },
+        "issue_codes": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/issue_code"
+          },
+          "uniqueItems": true
+        },
+        "rationale": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2400
+        },
+        "evidence_ids": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/identifier"
+          },
+          "minItems": 0,
+          "uniqueItems": true
+        },
+        "suggested_annotation": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/annotation_payload"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "suggested_qa_revision": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 1800
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "decision",
+        "issue_codes",
+        "rationale",
+        "evidence_ids",
+        "suggested_annotation",
+        "suggested_qa_revision"
+      ],
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "decision": {
+                "const": "PASS"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "issue_codes": {
+                "maxItems": 0
+              },
+              "suggested_annotation": {
+                "type": "null"
+              },
+              "suggested_qa_revision": {
+                "type": "null"
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "issue_codes": {
+                "minItems": 1
+              }
+            }
+          }
+        }
+      ],
+      "description": "建议不能直接覆盖候选。issue_codes 属于审核诊断，不是任务类别。"
+    },
+    "option": {
+      "type": "object",
+      "properties": {
+        "option_id": {
+          "$ref": "#/$defs/identifier"
+        },
+        "text": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1200
+        },
+        "label_codes": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "uniqueItems": true,
+          "maxItems": 10
+        }
+      },
+      "required": [
+        "option_id",
+        "text"
+      ],
+      "additionalProperties": false,
+      "description": "label_codes 可选，用于类别型选项的语义映射；内容比较题不必强行映射类别。"
+    },
+    "qa_payload": {
+      "type": "object",
+      "properties": {
+        "task_id": {
+          "$ref": "#/$defs/task_id"
+        },
+        "question": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2400
+        },
+        "question_type": {
+          "enum": [
+            "single_choice",
+            "multiple_choice"
+          ]
+        },
+        "options": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/option"
+          },
+          "minItems": 2,
+          "maxItems": 10
+        },
+        "answer_option_ids": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/identifier"
+          },
+          "minItems": 1,
+          "uniqueItems": true
+        },
+        "target_labels": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1,
+          "maxItems": 10,
+          "uniqueItems": true
+        },
+        "rationale": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1800
+        },
+        "evidence_ids": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/identifier"
+          },
+          "minItems": 0,
+          "uniqueItems": true
+        },
+        "required_inputs": {
+          "type": "array",
+          "items": {
+            "enum": [
+              "text",
+              "image",
+              "reference_text",
+              "reference_image",
+              "evidence"
+            ]
+          },
+          "minItems": 1,
+          "uniqueItems": true
+        },
+        "qa_mode": {
+          "enum": [
+            "content",
+            "paired_comparison",
+            "evidence_assisted"
+          ]
+        }
+      },
+      "required": [
+        "task_id",
+        "question",
+        "question_type",
+        "options",
+        "answer_option_ids",
+        "target_labels",
+        "rationale",
+        "evidence_ids",
+        "required_inputs",
+        "qa_mode"
+      ],
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "task_id": {
+                "const": "text_reasoning"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "target_labels": {
+                "type": "array",
+                "items": {
+                  "enum": [
+                    "OT",
+                    "FT"
+                  ]
+                },
+                "uniqueItems": true,
+                "maxItems": 1
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "task_id": {
+                "const": "image_perception"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "target_labels": {
+                "type": "array",
+                "items": {
+                  "enum": [
+                    "OI",
+                    "FI"
+                  ]
+                },
+                "uniqueItems": true,
+                "maxItems": 1
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "task_id": {
+                "const": "reality_plausibility"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "target_labels": {
+                "type": "array",
+                "items": {
+                  "enum": [
+                    "KE",
+                    "ES",
+                    "EF",
+                    "UNKNOWN"
+                  ]
+                },
+                "uniqueItems": true,
+                "maxItems": 1
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "task_id": {
+                "const": "image_text_consistency"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "target_labels": {
+                "type": "array",
+                "items": {
+                  "enum": [
+                    "C1",
+                    "C2",
+                    "C3",
+                    "C4",
+                    "C5",
+                    "UNKNOWN"
+                  ]
+                },
+                "uniqueItems": true,
+                "maxItems": 1
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "task_id": {
+                "const": "persuasion_strategy"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "target_labels": {
+                "type": "array",
+                "items": {
+                  "enum": [
+                    "POLARIZATION",
+                    "AUTHORITY",
+                    "SOCIAL_PROOF",
+                    "STORYTELLING",
+                    "BANDWAGON",
+                    "RHETORICAL_QUESTION",
+                    "LOGICAL_REASONING",
+                    "NARRATIVE_ENGAGEMENT",
+                    "EMOTIONAL_APPEAL",
+                    "UNKNOWN"
+                  ]
+                },
+                "uniqueItems": true,
+                "maxItems": 10
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "task_id": {
+                "const": "intent_analysis"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "target_labels": {
+                "type": "array",
+                "items": {
+                  "enum": [
+                    "PUBLIC_INTEREST",
+                    "ECONOMIC_INTEREST",
+                    "POLITICAL_INTEREST",
+                    "PSYCHOLOGICAL_FULFILLMENT",
+                    "UNKNOWN"
+                  ]
+                },
+                "uniqueItems": true,
+                "maxItems": 1
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "target_labels": {
+                "contains": {
+                  "const": "UNKNOWN"
+                }
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "target_labels": {
+                "maxItems": 1
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "question_type": {
+                "const": "single_choice"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "answer_option_ids": {
+                "maxItems": 1
+              }
+            }
+          }
+        }
+      ],
+      "description": "稳定 option_id 与集合 answer_option_ids；选项唯一、答案属于选项及标签覆盖由语义校验器检查。"
+    },
+    "media_asset": {
+      "type": "object",
+      "properties": {
+        "media_id": {
+          "$ref": "#/$defs/identifier"
+        },
+        "path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "hash_status": {
+          "enum": [
+            "verified",
+            "placeholder"
+          ]
+        },
+        "mime_type": {
+          "enum": [
+            "image/png",
+            "image/jpeg",
+            "image/webp"
+          ]
+        },
+        "width": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "height": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "original_media_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/identifier"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "media_id",
+        "path",
+        "sha256",
+        "hash_status",
+        "mime_type",
+        "width",
+        "height",
+        "original_media_id"
+      ],
+      "additionalProperties": false,
+      "description": "path 相对开发包或数据根目录；模型输入使用中性 media_id，不把文件名当作事实。"
+    },
+    "source": {
+      "type": "object",
+      "properties": {
+        "dataset": {
+          "type": "string",
+          "minLength": 1
+        },
+        "dataset_version": {
+          "$ref": "#/$defs/version"
+        },
+        "source_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "source_url": {
+          "anyOf": [
+            {
+              "type": "string",
+              "format": "uri"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "source_veracity": {
+          "anyOf": [
+            {
+              "type": [
+                "string",
+                "number",
+                "boolean"
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "license_reference": {
+          "type": "string",
+          "minLength": 1
+        },
+        "redistribution_status": {
+          "enum": [
+            "permitted",
+            "restricted",
+            "unverified",
+            "fixture_only"
+          ]
+        }
+      },
+      "required": [
+        "dataset",
+        "dataset_version",
+        "source_id",
+        "source_url",
+        "source_veracity",
+        "license_reference",
+        "redistribution_status"
+      ],
+      "additionalProperties": false
+    },
+    "operation": {
+      "type": "object",
+      "properties": {
+        "operation_id": {
+          "$ref": "#/$defs/identifier"
+        },
+        "operation_type": {
+          "type": "string",
+          "minLength": 1
+        },
+        "tool": {
+          "type": "string",
+          "minLength": 1
+        },
+        "tool_version": {
+          "$ref": "#/$defs/version"
+        },
+        "before_summary": {
+          "type": "string",
+          "minLength": 1
+        },
+        "after_summary": {
+          "type": "string",
+          "minLength": 1
+        },
+        "target_error": {
+          "type": "string",
+          "minLength": 1
+        },
+        "verification_status": {
+          "enum": [
+            "verified",
+            "failed",
+            "pending"
+          ]
+        },
+        "verification_evidence_ids": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/identifier"
+          },
+          "minItems": 0,
+          "uniqueItems": true
+        }
+      },
+      "required": [
+        "operation_id",
+        "operation_type",
+        "tool",
+        "tool_version",
+        "before_summary",
+        "after_summary",
+        "target_error",
+        "verification_status",
+        "verification_evidence_ids"
+      ],
+      "additionalProperties": false
+    },
+    "sample": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": "1.0.0"
+        },
+        "record_type": {
+          "const": "sample"
+        },
+        "is_mock": {
+          "type": "boolean"
+        },
+        "created_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "record_version": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "语义内容版本；单纯状态或质量投影变化不增加此版本。"
+        },
+        "supersedes_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/identifier"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "仅在新语义内容记录取代旧版本时设置；审核通过不创建替代 ID。"
+        },
+        "input_hash": {
+          "$ref": "#/$defs/sha256"
+        },
+        "content_hash": {
+          "$ref": "#/$defs/sha256"
+        },
+        "mock_note": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "sample_id": {
+          "$ref": "#/$defs/identifier"
+        },
+        "source": {
+          "$ref": "#/$defs/source"
+        },
+        "text": {
+          "type": "string",
+          "minLength": 1
+        },
+        "text_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "media": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/media_asset"
+          },
+          "minItems": 1
+        },
+        "target_claims": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/target_claim"
+          },
+          "minItems": 1
+        },
+        "text_provenance": {
+          "enum": [
+            "OT",
+            "FT"
+          ]
+        },
+        "image_provenance": {
+          "enum": [
+            "OI",
+            "FI"
+          ]
+        },
+        "family_id": {
+          "$ref": "#/$defs/identifier"
+        },
+        "parent_sample_ids": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/identifier"
+          },
+          "minItems": 0,
+          "uniqueItems": true
+        },
+        "operation": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/operation"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "leakage_group_id": {
+          "$ref": "#/$defs/identifier"
+        },
+        "split": {
+          "enum": [
+            "unassigned",
+            "train",
+            "dev",
+            "test"
+          ]
+        },
+        "pools": {
+          "type": "array",
+          "items": {
+            "enum": [
+              "pilot_dev",
+              "audit_holdout",
+              "production_train",
+              "benchmark_dev",
+              "benchmark_test"
+            ]
+          },
+          "uniqueItems": true
+        },
+        "status": {
+          "enum": [
+            "INGESTED",
+            "VALIDATED",
+            "QUARANTINED",
+            "EXCLUDED"
+          ]
+        },
+        "evidence_ids": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/identifier"
+          },
+          "minItems": 0,
+          "uniqueItems": true
+        }
+      },
+      "required": [
+        "schema_version",
+        "record_type",
+        "is_mock",
+        "created_at",
+        "record_version",
+        "supersedes_id",
+        "input_hash",
+        "content_hash",
+        "mock_note",
+        "sample_id",
+        "source",
+        "text",
+        "text_sha256",
+        "media",
+        "target_claims",
+        "text_provenance",
+        "image_provenance",
+        "family_id",
+        "parent_sample_ids",
+        "operation",
+        "leakage_group_id",
+        "split",
+        "pools",
+        "status",
+        "evidence_ids"
+      ],
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "is_mock": {
+                "const": true
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "mock_note": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "mock_note": {
+                "type": "null"
+              },
+              "input_hash": {
+                "not": {
+                  "const": "0000000000000000000000000000000000000000000000000000000000000000"
+                }
+              },
+              "content_hash": {
+                "not": {
+                  "const": "0000000000000000000000000000000000000000000000000000000000000000"
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "anyOf": [
+              {
+                "properties": {
+                  "text_provenance": {
+                    "const": "FT"
+                  }
+                }
+              },
+              {
+                "properties": {
+                  "image_provenance": {
+                    "const": "FI"
+                  }
+                }
+              }
+            ]
+          },
+          "then": {
+            "properties": {
+              "parent_sample_ids": {
+                "minItems": 1
+              },
+              "operation": {
+                "allOf": [
+                  {
+                    "$ref": "#/$defs/operation"
+                  },
+                  {
+                    "properties": {
+                      "verification_status": {
+                        "const": "verified"
+                      },
+                      "verification_evidence_ids": {
+                        "minItems": 1
+                      }
+                    }
+                  }
+                ]
+              }
+            }
+          }
+        }
+      ],
+      "description": "样本语义内容及 sample_id 按内容版本不可变；content_hash 为样本内容版本哈希，input_hash 为来源或操作输入哈希。状态由事件重建，JSONL 每个 sample_id 仅一条冻结快照。失败修改保存在操作/任务日志，不伪装成已核验 FT/FI。"
+    },
+    "evidence": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": "1.0.0"
+        },
+        "record_type": {
+          "const": "evidence"
+        },
+        "is_mock": {
+          "type": "boolean"
+        },
+        "created_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "record_version": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "supersedes_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/identifier"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "input_hash": {
+          "$ref": "#/$defs/sha256"
+        },
+        "content_hash": {
+          "$ref": "#/$defs/sha256"
+        },
+        "mock_note": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "evidence_id": {
+          "$ref": "#/$defs/identifier"
+        },
+        "sample_ids": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/identifier"
+          },
+          "minItems": 1,
+          "uniqueItems": true
+        },
+        "evidence_type": {
+          "enum": [
+            "visible_image",
+            "text_span",
+            "source_metadata",
+            "construction_log",
+            "external_document"
+          ]
+        },
+        "source_locator": {
+          "type": "object",
+          "properties": {
+            "path": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "url": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "format": "uri"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "media_id": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/identifier"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "path",
+            "url",
+            "media_id"
+          ],
+          "additionalProperties": false
+        },
+        "accessed_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "material_time": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "summary": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 6000
+        },
+        "snapshot_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "visibility": {
+          "enum": [
+            "construction",
+            "solver",
+            "both"
+          ]
+        },
+        "direct_answer_present": {
+          "type": "boolean"
+        },
+        "status": {
+          "enum": [
+            "AVAILABLE",
+            "UNAVAILABLE",
+            "EXCLUDED"
+          ]
+        }
+      },
+      "required": [
+        "schema_version",
+        "record_type",
+        "is_mock",
+        "created_at",
+        "record_version",
+        "supersedes_id",
+        "input_hash",
+        "content_hash",
+        "mock_note",
+        "evidence_id",
+        "sample_ids",
+        "evidence_type",
+        "source_locator",
+        "accessed_at",
+        "material_time",
+        "summary",
+        "snapshot_sha256",
+        "visibility",
+        "direct_answer_present",
+        "status"
+      ],
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "is_mock": {
+                "const": true
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "mock_note": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "mock_note": {
+                "type": "null"
+              },
+              "input_hash": {
+                "not": {
+                  "const": "0000000000000000000000000000000000000000000000000000000000000000"
+                }
+              },
+              "content_hash": {
+                "not": {
+                  "const": "0000000000000000000000000000000000000000000000000000000000000000"
+                }
+              }
+            }
+          }
+        }
+      ],
+      "description": "证据摘要不是独立模型想象；必须有来源定位、快照哈希与可见性。"
+    },
+    "annotation": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": "1.0.0"
+        },
+        "record_type": {
+          "const": "annotation"
+        },
+        "is_mock": {
+          "type": "boolean"
+        },
+        "created_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "record_version": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "语义内容版本；单纯状态或质量投影变化不增加此版本。"
+        },
+        "supersedes_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/identifier"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "仅在新语义内容记录取代旧版本时设置；审核通过不创建替代 ID。"
+        },
+        "input_hash": {
+          "$ref": "#/$defs/sha256"
+        },
+        "content_hash": {
+          "$ref": "#/$defs/sha256"
+        },
+        "mock_note": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "annotation_id": {
+          "$ref": "#/$defs/identifier"
+        },
+        "sample_id": {
+          "$ref": "#/$defs/identifier"
+        },
+        "payload": {
+          "$ref": "#/$defs/annotation_payload"
+        },
+        "quality_tier": {
+          "$ref": "#/$defs/quality_tier"
+        },
+        "status": {
+          "$ref": "#/$defs/annotation_status"
+        },
+        "review_ids": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/identifier"
+          },
+          "minItems": 0,
+          "uniqueItems": true
+        },
+        "human_vote_ids": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/identifier"
+          },
+          "minItems": 0,
+          "uniqueItems": true
+        },
+        "adjudication_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/identifier"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "label_schema_version": {
+          "$ref": "#/$defs/version"
+        },
+        "producer": {
+          "$ref": "#/$defs/producer"
+        },
+        "available_evidence_ids": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/identifier"
+          },
+          "minItems": 0,
+          "uniqueItems": true
+        }
+      },
+      "required": [
+        "schema_version",
+        "record_type",
+        "is_mock",
+        "created_at",
+        "record_version",
+        "supersedes_id",
+        "input_hash",
+        "content_hash",
+        "mock_note",
+        "annotation_id",
+        "sample_id",
+        "payload",
+        "quality_tier",
+        "status",
+        "review_ids",
+        "human_vote_ids",
+        "adjudication_id",
+        "label_schema_version",
+        "producer",
+        "available_evidence_ids"
+      ],
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "is_mock": {
+                "const": true
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "mock_note": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "mock_note": {
+                "type": "null"
+              },
+              "input_hash": {
+                "not": {
+                  "const": "0000000000000000000000000000000000000000000000000000000000000000"
+                }
+              },
+              "content_hash": {
+                "not": {
+                  "const": "0000000000000000000000000000000000000000000000000000000000000000"
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "quality_tier": {
+                "const": "gold"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "human_vote_ids": {
+                "minItems": 2
+              },
+              "adjudication_id": {
+                "$ref": "#/$defs/identifier"
+              },
+              "status": {
+                "enum": [
+                  "ACCEPTED_GOLD",
+                  "STALE"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "ACCEPTED_GOLD"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "quality_tier": {
+                "const": "gold"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "ACCEPTED_SILVER"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "quality_tier": {
+                "const": "silver"
+              },
+              "review_ids": {
+                "minItems": 1
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "payload": {
+                "properties": {
+                  "applicability": {
+                    "const": "not_applicable"
+                  }
+                }
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "status": {
+                "enum": [
+                  "SKIPPED",
+                  "STALE"
+                ]
+              },
+              "quality_tier": {
+                "const": "unresolved"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "SKIPPED"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "payload": {
+                "properties": {
+                  "applicability": {
+                    "const": "not_applicable"
+                  }
+                }
+              }
+            }
+          }
+        }
+      ],
+      "description": "语义 payload 与 annotation_id 不可变；content_hash=SHA256(UTF-8规范化payload JSON)，input_hash覆盖可见材料与执行版本。status、quality_tier、review_ids 和人审引用是由事件及相关记录派生的冻结时点投影；PASS 更新投影，不生成新 annotation_id。只有语义变更才新建 ID/supersedes_id。技术失败只记 job_event。gold 必须有独立人审及仲裁；schema 的最少两票为结构下限，实际人数读取 human.gold_independent_votes。"
+    },
+    "review": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": "1.0.0"
+        },
+        "record_type": {
+          "const": "review"
+        },
+        "is_mock": {
+          "type": "boolean"
+        },
+        "created_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "record_version": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "supersedes_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/identifier"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "input_hash": {
+          "$ref": "#/$defs/sha256"
+        },
+        "content_hash": {
+          "$ref": "#/$defs/sha256"
+        },
+        "mock_note": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "review_id": {
+          "$ref": "#/$defs/identifier"
+        },
+        "target_record_type": {
+          "enum": [
+            "annotation",
+            "qa"
+          ]
+        },
+        "target_id": {
+          "$ref": "#/$defs/identifier"
+        },
+        "target_content_hash": {
+          "$ref": "#/$defs/sha256"
+        },
+        "stage": {
+          "enum": [
+            "review_labels",
+            "review_qa"
+          ]
+        },
+        "review_mode": {
+          "enum": [
+            "candidate_aware",
+            "blind_first"
+          ]
+        },
+        "payload": {
+          "$ref": "#/$defs/review_payload"
+        },
+        "producer": {
+          "$ref": "#/$defs/producer"
+        },
+        "available_evidence_ids": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/identifier"
+          },
+          "minItems": 0,
+          "uniqueItems": true
+        },
+        "status": {
+          "enum": [
+            "COMPLETED",
+            "STALE"
+          ]
+        },
+        "blind_prediction": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/annotation_payload"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "schema_version",
+        "record_type",
+        "is_mock",
+        "created_at",
+        "record_version",
+        "supersedes_id",
+        "input_hash",
+        "content_hash",
+        "mock_note",
+        "review_id",
+        "target_record_type",
+        "target_id",
+        "target_content_hash",
+        "stage",
+        "review_mode",
+        "payload",
+        "producer",
+        "available_evidence_ids",
+        "status",
+        "blind_prediction"
+      ],
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "is_mock": {
+                "const": true
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "mock_note": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "mock_note": {
+                "type": "null"
+              },
+              "input_hash": {
+                "not": {
+                  "const": "0000000000000000000000000000000000000000000000000000000000000000"
+                }
+              },
+              "content_hash": {
+                "not": {
+                  "const": "0000000000000000000000000000000000000000000000000000000000000000"
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "target_record_type": {
+                "const": "annotation"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "stage": {
+                "const": "review_labels"
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "stage": {
+                "const": "review_qa"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "review_mode": {
+                "const": "candidate_aware"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "blind_prediction": {
+                "type": "null"
+              }
+            }
+          }
+        }
+      ],
+      "description": "不可变审核结果，绑定被审语义 ID 与内容哈希；content_hash 为 review_payload 哈希。PASS 更新目标工作流投影，不改变目标语义 ID。blind_first 的额外调用独立记录；QA 盲作答可扩展为单独答题记录。"
+    },
+    "solver_input": {
+      "type": "object",
+      "properties": {
+        "projection_version": {
+          "$ref": "#/$defs/version"
+        },
+        "text": {
+          "type": "string"
+        },
+        "media_ids": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/identifier"
+          },
+          "minItems": 0,
+          "uniqueItems": true
+        },
+        "reference_sample_ids": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/identifier"
+          },
+          "minItems": 0,
+          "uniqueItems": true
+        },
+        "evidence_ids": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/identifier"
+          },
+          "minItems": 0,
+          "uniqueItems": true
+        },
+        "input_hash": {
+          "$ref": "#/$defs/sha256"
+        }
+      },
+      "required": [
+        "projection_version",
+        "text",
+        "media_ids",
+        "reference_sample_ids",
+        "evidence_ids",
+        "input_hash"
+      ],
+      "additionalProperties": false,
+      "description": "实际可见材料的引用；导出时加入 question/options。禁止混入答案、target_labels、rationale、source_veracity、制作目标或构建模型预测。"
+    },
+    "qa": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": "1.0.0"
+        },
+        "record_type": {
+          "const": "qa"
+        },
+        "is_mock": {
+          "type": "boolean"
+        },
+        "created_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "record_version": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "语义内容版本；单纯状态或质量投影变化不增加此版本。"
+        },
+        "supersedes_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/identifier"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "仅在新语义内容记录取代旧版本时设置；审核通过不创建替代 ID。"
+        },
+        "input_hash": {
+          "$ref": "#/$defs/sha256"
+        },
+        "content_hash": {
+          "$ref": "#/$defs/sha256"
+        },
+        "mock_note": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "qa_id": {
+          "$ref": "#/$defs/identifier"
+        },
+        "sample_id": {
+          "$ref": "#/$defs/identifier"
+        },
+        "source_annotation_id": {
+          "$ref": "#/$defs/identifier"
+        },
+        "source_annotation_content_hash": {
+          "$ref": "#/$defs/sha256"
+        },
+        "payload": {
+          "$ref": "#/$defs/qa_payload"
+        },
+        "solver_input": {
+          "$ref": "#/$defs/solver_input"
+        },
+        "quality_tier": {
+          "$ref": "#/$defs/quality_tier"
+        },
+        "status": {
+          "$ref": "#/$defs/annotation_status"
+        },
+        "review_ids": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/identifier"
+          },
+          "minItems": 0,
+          "uniqueItems": true
+        },
+        "human_vote_ids": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/identifier"
+          },
+          "minItems": 0,
+          "uniqueItems": true
+        },
+        "adjudication_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/identifier"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "label_schema_version": {
+          "$ref": "#/$defs/version"
+        },
+        "producer": {
+          "$ref": "#/$defs/producer"
+        },
+        "available_evidence_ids": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/identifier"
+          },
+          "minItems": 0,
+          "uniqueItems": true
+        }
+      },
+      "required": [
+        "schema_version",
+        "record_type",
+        "is_mock",
+        "created_at",
+        "record_version",
+        "supersedes_id",
+        "input_hash",
+        "content_hash",
+        "mock_note",
+        "qa_id",
+        "sample_id",
+        "source_annotation_id",
+        "source_annotation_content_hash",
+        "payload",
+        "solver_input",
+        "quality_tier",
+        "status",
+        "review_ids",
+        "human_vote_ids",
+        "adjudication_id",
+        "label_schema_version",
+        "producer",
+        "available_evidence_ids"
+      ],
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "is_mock": {
+                "const": true
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "mock_note": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "mock_note": {
+                "type": "null"
+              },
+              "input_hash": {
+                "not": {
+                  "const": "0000000000000000000000000000000000000000000000000000000000000000"
+                }
+              },
+              "content_hash": {
+                "not": {
+                  "const": "0000000000000000000000000000000000000000000000000000000000000000"
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "quality_tier": {
+                "const": "gold"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "human_vote_ids": {
+                "minItems": 2
+              },
+              "adjudication_id": {
+                "$ref": "#/$defs/identifier"
+              },
+              "status": {
+                "enum": [
+                  "ACCEPTED_GOLD",
+                  "STALE"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "ACCEPTED_GOLD"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "quality_tier": {
+                "const": "gold"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "ACCEPTED_SILVER"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "quality_tier": {
+                "const": "silver"
+              },
+              "review_ids": {
+                "minItems": 1
+              }
+            }
+          }
+        },
+        {
+          "properties": {
+            "status": {
+              "not": {
+                "const": "SKIPPED"
+              }
+            }
+          }
+        }
+      ],
+      "description": "QA payload 与 qa_id 按语义版本不可变，content_hash 为 qa_payload 哈希，input_hash 绑定答题输入及上游版本。标签与 QA 独立审核；状态、等级及审核引用是事件派生的冻结投影，PASS 不更换 qa_id。QA gold 需上游标签 gold 及题目层人审；实际独立票数读取实验配置，schema 两票为结构下限。"
+    },
+    "human_vote": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": "1.0.0"
+        },
+        "record_type": {
+          "const": "human_vote"
+        },
+        "is_mock": {
+          "type": "boolean"
+        },
+        "created_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "record_version": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "supersedes_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/identifier"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "input_hash": {
+          "$ref": "#/$defs/sha256"
+        },
+        "content_hash": {
+          "$ref": "#/$defs/sha256"
+        },
+        "mock_note": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "human_vote_id": {
+          "$ref": "#/$defs/identifier"
+        },
+        "target_record_type": {
+          "enum": [
+            "annotation",
+            "qa"
+          ]
+        },
+        "target_id": {
+          "$ref": "#/$defs/identifier"
+        },
+        "target_content_hash": {
+          "$ref": "#/$defs/sha256"
+        },
+        "annotator_id": {
+          "$ref": "#/$defs/identifier"
+        },
+        "guideline_version": {
+          "$ref": "#/$defs/version"
+        },
+        "blinded_to_model": {
+          "type": "boolean"
+        },
+        "blinded_to_other_humans": {
+          "type": "boolean"
+        },
+        "vote_mode": {
+          "enum": [
+            "independent",
+            "correction"
+          ]
+        },
+        "annotation_answer": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/annotation_payload"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "qa_answer": {
+          "anyOf": [
+            {
+              "type": "object",
+              "properties": {
+                "answer_option_ids": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/$defs/identifier"
+                  },
+                  "minItems": 0,
+                  "uniqueItems": true
+                },
+                "decision": {
+                  "enum": [
+                    "ACCEPTABLE",
+                    "NEEDS_REVISION",
+                    "UNDETERMINED"
+                  ]
+                },
+                "rationale": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "evidence_ids": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/$defs/identifier"
+                  },
+                  "minItems": 0,
+                  "uniqueItems": true
+                }
+              },
+              "required": [
+                "answer_option_ids",
+                "decision",
+                "rationale",
+                "evidence_ids"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "audit_selection_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/identifier"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "elapsed_seconds": {
+          "type": "number",
+          "minimum": 0
+        },
+        "status": {
+          "enum": [
+            "SUBMITTED",
+            "WITHDRAWN"
+          ]
+        }
+      },
+      "required": [
+        "schema_version",
+        "record_type",
+        "is_mock",
+        "created_at",
+        "record_version",
+        "supersedes_id",
+        "input_hash",
+        "content_hash",
+        "mock_note",
+        "human_vote_id",
+        "target_record_type",
+        "target_id",
+        "target_content_hash",
+        "annotator_id",
+        "guideline_version",
+        "blinded_to_model",
+        "blinded_to_other_humans",
+        "vote_mode",
+        "annotation_answer",
+        "qa_answer",
+        "audit_selection_id",
+        "elapsed_seconds",
+        "status"
+      ],
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "is_mock": {
+                "const": true
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "mock_note": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "mock_note": {
+                "type": "null"
+              },
+              "input_hash": {
+                "not": {
+                  "const": "0000000000000000000000000000000000000000000000000000000000000000"
+                }
+              },
+              "content_hash": {
+                "not": {
+                  "const": "0000000000000000000000000000000000000000000000000000000000000000"
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "target_record_type": {
+                "const": "annotation"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "annotation_answer": {
+                "$ref": "#/$defs/annotation_payload"
+              },
+              "qa_answer": {
+                "type": "null"
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "qa_answer": {
+                "type": "object"
+              },
+              "annotation_answer": {
+                "type": "null"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "vote_mode": {
+                "const": "independent"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "blinded_to_model": {
+                "const": true
+              },
+              "blinded_to_other_humans": {
+                "const": true
+              }
+            }
+          }
+        }
+      ],
+      "description": "匿名人工独立原始答案；不得由模型或示例生成器冒充真实人审。"
+    },
+    "adjudication": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": "1.0.0"
+        },
+        "record_type": {
+          "const": "adjudication"
+        },
+        "is_mock": {
+          "type": "boolean"
+        },
+        "created_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "record_version": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "supersedes_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/identifier"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "input_hash": {
+          "$ref": "#/$defs/sha256"
+        },
+        "content_hash": {
+          "$ref": "#/$defs/sha256"
+        },
+        "mock_note": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "adjudication_id": {
+          "$ref": "#/$defs/identifier"
+        },
+        "target_record_type": {
+          "enum": [
+            "annotation",
+            "qa"
+          ]
+        },
+        "target_id": {
+          "$ref": "#/$defs/identifier"
+        },
+        "target_content_hash": {
+          "$ref": "#/$defs/sha256"
+        },
+        "human_vote_ids": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/identifier"
+          },
+          "minItems": 2,
+          "uniqueItems": true
+        },
+        "adjudicator_id": {
+          "$ref": "#/$defs/identifier"
+        },
+        "guideline_version": {
+          "$ref": "#/$defs/version"
+        },
+        "outcome": {
+          "enum": [
+            "CONFIRMED",
+            "CORRECTED",
+            "UNRESOLVED"
+          ]
+        },
+        "final_annotation_payload": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/annotation_payload"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "final_qa_payload": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/qa_payload"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "rationale": {
+          "type": "string",
+          "minLength": 1
+        },
+        "evidence_ids": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/identifier"
+          },
+          "minItems": 0,
+          "uniqueItems": true
+        },
+        "eligible_for_gold": {
+          "type": "boolean"
+        },
+        "status": {
+          "enum": [
+            "FINALIZED",
+            "WITHDRAWN"
+          ]
+        }
+      },
+      "required": [
+        "schema_version",
+        "record_type",
+        "is_mock",
+        "created_at",
+        "record_version",
+        "supersedes_id",
+        "input_hash",
+        "content_hash",
+        "mock_note",
+        "adjudication_id",
+        "target_record_type",
+        "target_id",
+        "target_content_hash",
+        "human_vote_ids",
+        "adjudicator_id",
+        "guideline_version",
+        "outcome",
+        "final_annotation_payload",
+        "final_qa_payload",
+        "rationale",
+        "evidence_ids",
+        "eligible_for_gold",
+        "status"
+      ],
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "is_mock": {
+                "const": true
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "mock_note": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "mock_note": {
+                "type": "null"
+              },
+              "input_hash": {
+                "not": {
+                  "const": "0000000000000000000000000000000000000000000000000000000000000000"
+                }
+              },
+              "content_hash": {
+                "not": {
+                  "const": "0000000000000000000000000000000000000000000000000000000000000000"
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "eligible_for_gold": {
+                "const": true
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "outcome": {
+                "enum": [
+                  "CONFIRMED",
+                  "CORRECTED"
+                ]
+              },
+              "status": {
+                "const": "FINALIZED"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "outcome": {
+                "enum": [
+                  "CONFIRMED",
+                  "CORRECTED"
+                ]
+              },
+              "target_record_type": {
+                "const": "annotation"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "final_annotation_payload": {
+                "$ref": "#/$defs/annotation_payload"
+              },
+              "final_qa_payload": {
+                "type": "null"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "outcome": {
+                "enum": [
+                  "CONFIRMED",
+                  "CORRECTED"
+                ]
+              },
+              "target_record_type": {
+                "const": "qa"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "final_qa_payload": {
+                "$ref": "#/$defs/qa_payload"
+              },
+              "final_annotation_payload": {
+                "type": "null"
+              }
+            }
+          }
+        }
+      ],
+      "description": "不可变仲裁结果，关联独立人工原始答案；eligible_for_gold 只是仲裁资格证据，最终 gold 投影还须满足实验配置规定的独立人数和相应记录校验。"
+    },
+    "audit_selection": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": "1.0.0"
+        },
+        "record_type": {
+          "const": "audit_selection"
+        },
+        "is_mock": {
+          "type": "boolean"
+        },
+        "created_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "record_version": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "supersedes_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/identifier"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "input_hash": {
+          "$ref": "#/$defs/sha256"
+        },
+        "content_hash": {
+          "$ref": "#/$defs/sha256"
+        },
+        "mock_note": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "selection_id": {
+          "$ref": "#/$defs/identifier"
+        },
+        "population_id": {
+          "$ref": "#/$defs/identifier"
+        },
+        "population_size": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "stratum_id": {
+          "$ref": "#/$defs/identifier"
+        },
+        "stratum_population_size": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "sampling_probability": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "maximum": 1
+        },
+        "sampling_seed": {
+          "type": "integer"
+        },
+        "audit_batch_id": {
+          "$ref": "#/$defs/identifier"
+        },
+        "selected_record_type": {
+          "enum": [
+            "sample",
+            "annotation",
+            "qa"
+          ]
+        },
+        "selected_record_id": {
+          "$ref": "#/$defs/identifier"
+        },
+        "sampling_design": {
+          "enum": [
+            "srs",
+            "stratified_srs",
+            "census"
+          ]
+        },
+        "audit_purpose": {
+          "enum": [
+            "quality_audit",
+            "calibration"
+          ]
+        },
+        "status": {
+          "enum": [
+            "SELECTED",
+            "COMPLETED",
+            "UNAVAILABLE"
+          ]
+        }
+      },
+      "required": [
+        "schema_version",
+        "record_type",
+        "is_mock",
+        "created_at",
+        "record_version",
+        "supersedes_id",
+        "input_hash",
+        "content_hash",
+        "mock_note",
+        "selection_id",
+        "population_id",
+        "population_size",
+        "stratum_id",
+        "stratum_population_size",
+        "sampling_probability",
+        "sampling_seed",
+        "audit_batch_id",
+        "selected_record_type",
+        "selected_record_id",
+        "sampling_design",
+        "audit_purpose",
+        "status"
+      ],
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "is_mock": {
+                "const": true
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "mock_note": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "mock_note": {
+                "type": "null"
+              },
+              "input_hash": {
+                "not": {
+                  "const": "0000000000000000000000000000000000000000000000000000000000000000"
+                }
+              },
+              "content_hash": {
+                "not": {
+                  "const": "0000000000000000000000000000000000000000000000000000000000000000"
+                }
+              }
+            }
+          }
+        }
+      ],
+      "description": "概率审计抽样记录；路由项的人工待办不是总体概率审计样本，不能伪造纳入概率。"
+    },
+    "model_lock": {
+      "type": "object",
+      "properties": {
+        "model_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "revision": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "backend": {
+          "type": "string",
+          "minLength": 1
+        },
+        "backend_version": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "processor_revision": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "chat_template_hash": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/sha256"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "precision": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "quantization": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "thinking_enabled": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "model_id",
+        "revision",
+        "backend",
+        "backend_version",
+        "processor_revision",
+        "chat_template_hash",
+        "precision",
+        "quantization",
+        "thinking_enabled"
+      ],
+      "additionalProperties": false
+    },
+    "run_manifest": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": "1.0.0"
+        },
+        "record_type": {
+          "const": "run_manifest"
+        },
+        "is_mock": {
+          "type": "boolean"
+        },
+        "created_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "record_version": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "supersedes_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/identifier"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "input_hash": {
+          "$ref": "#/$defs/sha256"
+        },
+        "content_hash": {
+          "$ref": "#/$defs/sha256"
+        },
+        "mock_note": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "run_id": {
+          "$ref": "#/$defs/identifier"
+        },
+        "mode": {
+          "enum": [
+            "mock",
+            "real"
+          ]
+        },
+        "code_revision": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "config_hash": {
+          "$ref": "#/$defs/sha256"
+        },
+        "label_schema_version": {
+          "$ref": "#/$defs/version"
+        },
+        "dataset_version": {
+          "$ref": "#/$defs/version"
+        },
+        "evidence_version": {
+          "$ref": "#/$defs/version"
+        },
+        "split_manifest_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/identifier"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "models": {
+          "type": "object",
+          "properties": {
+            "annotator": {
+              "$ref": "#/$defs/model_lock"
+            },
+            "reviewer": {
+              "$ref": "#/$defs/model_lock"
+            }
+          },
+          "required": [
+            "annotator",
+            "reviewer"
+          ],
+          "additionalProperties": false
+        },
+        "prompt_versions": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "runtime": {
+          "type": "object",
+          "additionalProperties": {
+            "type": [
+              "string",
+              "number",
+              "boolean",
+              "null"
+            ]
+          }
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "status": {
+          "enum": [
+            "PLANNED",
+            "RUNNING",
+            "COMPLETED",
+            "FAILED"
+          ]
+        }
+      },
+      "required": [
+        "schema_version",
+        "record_type",
+        "is_mock",
+        "created_at",
+        "record_version",
+        "supersedes_id",
+        "input_hash",
+        "content_hash",
+        "mock_note",
+        "run_id",
+        "mode",
+        "code_revision",
+        "config_hash",
+        "label_schema_version",
+        "dataset_version",
+        "evidence_version",
+        "split_manifest_id",
+        "models",
+        "prompt_versions",
+        "runtime",
+        "seed",
+        "status"
+      ],
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "is_mock": {
+                "const": true
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "mock_note": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "mock_note": {
+                "type": "null"
+              },
+              "input_hash": {
+                "not": {
+                  "const": "0000000000000000000000000000000000000000000000000000000000000000"
+                }
+              },
+              "content_hash": {
+                "not": {
+                  "const": "0000000000000000000000000000000000000000000000000000000000000000"
+                }
+              }
+            }
+          }
+        },
+        {
+          "properties": {
+            "models": {
+              "properties": {
+                "annotator": {
+                  "properties": {
+                    "model_id": {
+                      "const": "Qwen/Qwen3.8-27B"
+                    }
+                  }
+                },
+                "reviewer": {
+                  "properties": {
+                    "model_id": {
+                      "const": "google/gemma-4-31B-it"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "mode": {
+                "const": "real"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "is_mock": {
+                "const": false
+              },
+              "code_revision": {
+                "type": "string",
+                "minLength": 1
+              },
+              "models": {
+                "properties": {
+                  "annotator": {
+                    "properties": {
+                      "revision": {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      "backend_version": {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      "processor_revision": {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      "chat_template_hash": {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      "precision": {
+                        "type": "string",
+                        "minLength": 1
+                      }
+                    }
+                  },
+                  "reviewer": {
+                    "properties": {
+                      "revision": {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      "backend_version": {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      "processor_revision": {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      "chat_template_hash": {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      "precision": {
+                        "type": "string",
+                        "minLength": 1
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "is_mock": {
+                "const": true
+              }
+            }
+          }
+        }
+      ],
+      "description": "真实运行锁定代码、模型与环境版本；示例 PLANNED mock 不是模型执行报告。"
+    },
+    "job_event": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": "1.0.0"
+        },
+        "record_type": {
+          "const": "job_event"
+        },
+        "is_mock": {
+          "type": "boolean"
+        },
+        "created_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "record_version": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "supersedes_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/identifier"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "input_hash": {
+          "$ref": "#/$defs/sha256"
+        },
+        "content_hash": {
+          "$ref": "#/$defs/sha256"
+        },
+        "mock_note": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "event_id": {
+          "$ref": "#/$defs/identifier"
+        },
+        "job_id": {
+          "$ref": "#/$defs/identifier"
+        },
+        "run_id": {
+          "$ref": "#/$defs/identifier"
+        },
+        "stage": {
+          "enum": [
+            "ingest",
+            "validate_data",
+            "group",
+            "split",
+            "prepare_variants",
+            "verify_manipulation",
+            "annotate",
+            "review_labels",
+            "export_human",
+            "import_human",
+            "generate_qa",
+            "review_qa",
+            "audit",
+            "evaluate",
+            "release"
+          ]
+        },
+        "task_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/task_id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "subject_id": {
+          "$ref": "#/$defs/identifier"
+        },
+        "execution_state": {
+          "enum": [
+            "QUEUED",
+            "RUNNING",
+            "SUCCEEDED",
+            "RETRYABLE_ERROR",
+            "FAILED"
+          ]
+        },
+        "attempt": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "technical_retry_count": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 2
+        },
+        "format_repair_count": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "lease_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/identifier"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "lease_expires_at": {
+          "anyOf": [
+            {
+              "type": "string",
+              "format": "date-time"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "dependency_ids": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/identifier"
+          },
+          "minItems": 0,
+          "uniqueItems": true
+        },
+        "output_record_ids": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/identifier"
+          },
+          "minItems": 0,
+          "uniqueItems": true
+        },
+        "error": {
+          "anyOf": [
+            {
+              "type": "object",
+              "properties": {
+                "code": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "category": {
+                  "enum": [
+                    "technical",
+                    "format",
+                    "semantic",
+                    "resource",
+                    "data"
+                  ]
+                },
+                "message": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "retryable": {
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "code",
+                "category",
+                "message",
+                "retryable"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "duration_seconds": {
+          "type": "number",
+          "minimum": 0
+        },
+        "status": {
+          "enum": [
+            "RECORDED"
+          ]
+        }
+      },
+      "required": [
+        "schema_version",
+        "record_type",
+        "is_mock",
+        "created_at",
+        "record_version",
+        "supersedes_id",
+        "input_hash",
+        "content_hash",
+        "mock_note",
+        "event_id",
+        "job_id",
+        "run_id",
+        "stage",
+        "task_id",
+        "subject_id",
+        "execution_state",
+        "attempt",
+        "technical_retry_count",
+        "format_repair_count",
+        "lease_id",
+        "lease_expires_at",
+        "dependency_ids",
+        "output_record_ids",
+        "error",
+        "duration_seconds",
+        "status"
+      ],
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "is_mock": {
+                "const": true
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "mock_note": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "mock_note": {
+                "type": "null"
+              },
+              "input_hash": {
+                "not": {
+                  "const": "0000000000000000000000000000000000000000000000000000000000000000"
+                }
+              },
+              "content_hash": {
+                "not": {
+                  "const": "0000000000000000000000000000000000000000000000000000000000000000"
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "execution_state": {
+                "enum": [
+                  "RETRYABLE_ERROR",
+                  "FAILED"
+                ]
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "error": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "error": {
+                "type": "object",
+                "properties": {
+                  "category": {
+                    "const": "semantic"
+                  }
+                }
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "execution_state": {
+                "not": {
+                  "const": "RETRYABLE_ERROR"
+                }
+              },
+              "error": {
+                "properties": {
+                  "retryable": {
+                    "const": false
+                  }
+                }
+              }
+            }
+          }
+        }
+      ],
+      "description": "只追加的执行和工作流事件；与其引用的不可变结果共同重建 SQLite status/quality_tier/审核引用投影。通过审核不更换语义 ID。JSONL 冻结快照不重复保存同 ID 的历次状态。PENDING/排队及技术失败记录在工作项；失败不产生假 UNKNOWN 标注，语义不通过不得用技术重试刷到通过。"
+    }
+  }
+}

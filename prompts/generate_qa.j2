@@ -1,0 +1,9 @@
+Create one answerable multiple-choice question for the accepted {{ task_id }} annotation.
+Label inventory: {{ task_definition_json }}
+Decision guide: {{ task_instructions }}
+Accepted annotation: {{ accepted_annotation_json }}
+Solver-visible material: {{ visible_input_json }}
+Question and option policy: {{ qa_policy_json }}
+
+Base the answer on what the solver will see. Keep hidden labels, creation history, rationales and answer cues out of the stem. For provenance questions, supply the reference and current versions for a comparison, or ask about an observable effect. Use options of similar scope and length. Avoid catch-all options. Single-choice questions require one supported answer. For persuasion use multiple choice by default and include every supported strategy. Use stable option IDs in the answer key. Ask an uncertainty question only if the visible material supports that answer. If prerequisites are missing, the eligibility check must handle the case; never invent missing material.
+Response schema: {{ response_schema_json }}

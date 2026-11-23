@@ -1,0 +1,192 @@
+# Long-term implementation contract. The CLI is to be implemented.
+schema_version: "1.0.0"
+experiment_id: multimodal_rumor_v1
+spec_version: "1.0.0"
+mode: mock
+seed: 20261122
+language: en
+model_config: configs/models.yaml
+label_config: configs/labels.yaml
+record_schema: schemas/records.schema.json
+
+paths:
+  raw: data/raw
+  normalized: data/normalized
+  evidence: data/evidence
+  assets: data/assets
+  manifests: data/manifests
+  human: data/human
+  runs: runs
+  releases: releases
+  state_db: runs/state.sqlite3
+
+source:
+  adapter: generic_jsonl
+  dataset_name: null
+  dataset_version: null
+  input_jsonl: null
+  media_root: null
+  license_reference: null
+  source_veracity_mapping: {} # Explicit mapping required for real ingestion.
+  preserve_source_split: true
+  allow_unlicensed_media_redistribution: false
+
+fixture:
+  records: examples/records.jsonl
+  synthetic_only: true
+  is_mock: true
+
+preparation:
+  primary_images_per_sample: 1
+  paired_comparison_max_images: 2
+  keep_original_bytes: true
+  normalize_exif_orientation: true
+  exact_duplicate_hash: sha256
+  near_duplicate_threshold: null # Calibrate candidate grouping; not a universal cutoff.
+  missing_required_image_action: quarantine
+  text_truncation: reject_and_report
+  controlled_changes:
+    enabled: false
+    stage: preparation
+    text_generator_role: annotator
+    max_text_candidates_per_parent: 1
+    image_mode: import_verified_assets
+    require_all_parent_ids: true
+    require_operation_log: true
+    require_target_verification: true
+    allow_cross_split_parents: false
+
+splitting:
+  unit: leakage_group_id
+  train: 0.70
+  dev: 0.15
+  test: 0.15
+  seed: 20261122
+  preserve_source_test: true
+  freeze_before_prompt_tuning: true
+  freeze_before_variants: true
+  allow_qa_row_random_split: false
+  audit_pool_excluded_from_training: true
+
+annotation:
+  tasks: [text_reasoning, image_perception, reality_plausibility, image_text_consistency, persuasion_strategy, intent_analysis]
+  prompt_version: "1.1.1"
+  task_independent: true
+  conversation_scope: sample_task_stage
+  provenance_tasks: [text_reasoning, image_perception]
+  model_tasks: [reality_plausibility, image_text_consistency, persuasion_strategy, intent_analysis]
+  persuasion_mode: joint_within_task
+  max_rationale_chars: 600
+  require_existing_evidence_ids: true
+  expose_source_veracity: false
+  expose_other_task_predictions: false
+  use_self_reported_confidence_for_routing: false
+
+review:
+  protocol: candidate_aware
+  role: reviewer
+  review_each_model_annotation: true
+  review_each_qa: true
+  overwrite_candidate_with_suggestion: false
+  decisions: [PASS, NEEDS_HUMAN, REJECT]
+  pass_quality_tier: silver
+  unknown_alone_forces_rejection: false
+
+human:
+  first_pass_blind: true
+  pilot_independent_votes: 2
+  gold_independent_votes: 3
+  adjudicate_disagreements: true
+  require_qa_level_review_for_gold: true
+  preserve_pre_adjudication_votes: true
+  ordinary_corrections_auto_promote_gold: false
+  training:
+    rounds: 2
+    suggested_samples_per_round: 40
+    second_round_new_examples: true
+
+qa:
+  prompt_version: "1.1.1"
+  max_questions_per_sample_task: 1
+  label_tiers_allowed: [silver, gold]
+  single_choice_default_options: 4
+  min_options: 2
+  max_options: 10
+  persuasion_default_type: multiple_choice
+  provenance_default_mode: paired_comparison
+  require_all_correct_strategies_in_options: true
+  unknown_question_requires_explicit_answerability: true
+  randomize_display_order: true
+  answer_reference: stable_option_ids
+  separate_solver_input_and_answer_key: true
+
+audit:
+  suggested_pilot_source_samples: 300
+  suggested_holdout_source_samples: 500
+  auto_pass_sampling_fraction_initial: 0.10
+  routed_sampling_fraction_initial: 1.0
+  strata: [task_id, reviewer_decision, predicted_label, origin_condition]
+  merge_tiny_strata: true
+  save_inclusion_probabilities: true
+  confidence_level: 0.95
+  resample_unit: leakage_group_id
+  population_unit: annotation_or_qa
+  reviewer_alert_decisions: [NEEDS_HUMAN, REJECT]
+  use_inverse_probability_weighted_confusion: true
+  undefined_metric_value: null
+  zero_error_ci_action: insufficient_evidence_then_supplement
+  degenerate_bootstrap_can_pass_gate: false
+  do_not_estimate_population_error_from_flagged_only: true
+
+quality_goals:
+  status: provisional_before_pilot
+  auto_pass_residual_error_upper_95ci_max: 0.05
+  reviewer_error_recall_target: 0.90
+  require_per_task_report: true
+  require_per_class_support_counts: true
+  calibrated_manifest: null
+  production_requires_calibrated_manifest: true
+  per_task_fallback: full_human_review
+
+runtime:
+  workers_initial: 1
+  batch_source_samples_initial: 50
+  request_timeout_seconds: 180
+  technical_max_retries: 2
+  format_repair_max_attempts: 1
+  qa_format_revision_max_attempts: 1
+  semantic_retry_until_pass: false
+  max_calls_per_run: 2000
+  max_generated_tokens_per_run: 4000000
+  lease_seconds: 900
+  heartbeat_seconds: 30
+  stop_new_requests_on_budget_exhaustion: true
+
+evaluation:
+  require_gold_reference: true
+  test_answers_hidden_from_solver: true
+  invalid_or_timeout_answer_is_incorrect: true
+  builder_models_report_as_diagnostic: true
+  external_benchmark_model_ids: []
+  input_conditions: [full, text_only, image_only, question_options_only]
+  evidence_condition_separate: true
+  report_unknown_coverage_and_risk: true
+
+optional_experiments:
+  grouped_prompts: false
+  persuasion_labelwise: false
+  blind_first_review: false
+  controlled_pair_analysis: false
+  auxiliary_label_training: false
+  cross_source_test: false
+
+release:
+  local_only: true
+  fail_on_mock: true
+  fail_on_stale: true
+  fail_on_known_split_leakage: true
+  train_min_quality: silver
+  test_min_quality: gold
+  require_gold_qa_for_test: true
+  export_internal_reasoning: false
+  export_human_personal_identities: false

@@ -1,0 +1,10 @@
+Annotate {{ task_id }} for the fixed target claim.
+Label inventory: {{ task_definition_json }}
+Decision guide:
+{{ task_instructions }}
+
+Target claim (original text and Unicode code-point span): {{ target_claim_json }}
+Allowed material and evidence: {{ visible_input_json }}
+
+Select the supported label or label set for this task alone. Anchor the rationale in a specific claim span, image detail or supplied evidence item. Use UNKNOWN alone where the task permits it and identify the missing fact or unresolved boundary in unknown_reason. Use not_applicable with empty labels only when the evidence establishes inapplicability. Preserve the target even when a different claim would be easier to label.
+Response schema: {{ response_schema_json }}

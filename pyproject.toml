@@ -1,0 +1,15 @@
+[build-system]
+requires = ["setuptools>=63", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rumorlab"
+version = "0.1.0"
+requires-python = ">=3.9"
+dependencies = ["jsonschema>=4.16,<5", "PyYAML>=6,<7", "Jinja2>=3.1,<4", "Pillow>=9.2"]
+
+[project.scripts]
+rumorlab = "rumorlab.cli:main"
+
+[tool.setuptools]
+packages = ["rumorlab"]

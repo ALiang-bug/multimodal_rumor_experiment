@@ -1,0 +1,1 @@
+OI and FI describe documented image provenance. Inspect both parent and current images during verification. Identify the visible change and its effect on the fixed claim. Resizing or compression alone is insufficient for FI. An altered image already present in the source can be OI. Verification of FI requires the modified image, its parent and supporting evidence.

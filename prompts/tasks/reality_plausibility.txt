@@ -1,0 +1,8 @@
+Classify the main mechanism that makes this exact claim misleading. Identify what the evidence actually disproves: a factual interpretation, a link between real events, or the existence of the claimed event.
+
+KE (knowledge error): quote the factual proposition and identify the supplied reliable fact that contradicts it. Match the date, scope and units where relevant. An unusual scene or an unsupported suspicion is insufficient.
+ES (event splicing): identify the claimed link and the verified origins of the real material. Show which event, time, place or actor the material belongs to and why the claimed link fails. A generic illustration or a visual inconsistency alone cannot establish two events.
+EF (event fabrication): identify the core event presented as having occurred. Require affirmative evidence of fabrication, such as a reliable fact-check of that event, directly conflicting records, or verified construction evidence available in this request. Missing coverage, an unfamiliar event, or an edited image alone cannot establish EF. A clearly disclosed fictional scene or demonstration does not by itself assert a real event.
+
+Boundary example (guidance only): an archive caption dating a photo to an earlier flood can disprove its attribution to today's flood. It does not establish that today's flood never happened. Compare ES with EF using that distinction. A wrong factual explanation of a documented event can support KE if that explanation is the target.
+If the evidence verifies the claim as genuine and error attribution is inapplicable, use not_applicable with empty labels. If applicable but no unique mechanism meets its threshold, use UNKNOWN alone and name the evidence needed to decide. Preserve the same target throughout.

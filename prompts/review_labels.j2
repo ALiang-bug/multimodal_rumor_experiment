@@ -1,0 +1,12 @@
+Review one candidate annotation for {{ task_id }} in a separate candidate-aware session.
+Label inventory: {{ task_definition_json }}
+Apply the same evidence thresholds and boundary rules as the annotator:
+{{ task_instructions }}
+
+Fixed target: {{ target_claim_json }}
+Allowed material: {{ visible_input_json }}
+Candidate: {{ candidate_annotation_json }}
+
+Check the candidate's decisive cue against the supplied material and the closest competing interpretation. Treat the candidate's rationale as a claim to verify. For multiple labels, check each cue and any supported omission. Check applicability and the reason for UNKNOWN; an adequately justified UNKNOWN may pass. Route unresolved competing mechanisms or relations to NEEDS_HUMAN as specified in the guide.
+Use PASS for a supported candidate, NEEDS_HUMAN for a material evidence gap, ambiguity or a correctable error, and REJECT for an unusable record. Give a short, specific reason and existing evidence IDs. A suggestion is subject to subsequent verification.
+Response schema: {{ response_schema_json }}

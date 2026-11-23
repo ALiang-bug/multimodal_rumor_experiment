@@ -1,0 +1,10 @@
+# Reproduce the local CPython 3.9 M0 verification environment.
+attrs==21.4.0
+Jinja2==3.1.6
+jsonschema==4.16.0
+MarkupSafe==2.0.1
+Pillow==9.2.0
+pyrsistent==0.18.0
+PyYAML==6.0
+setuptools==63.4.1
+wheel==0.37.1

@@ -1,0 +1,1 @@
+OT and FT describe documented text provenance. Compare the parent and current text during verification, locate the factual change and check evidence for the intended false claim. Harmless editing and falsehood already present in the source do not establish FT. A comparison question requires the relevant reference text or observable evidence.
