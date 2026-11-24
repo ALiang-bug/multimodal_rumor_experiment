@@ -1,6 +1,6 @@
 # Prompt 合同
 
-版本 1.1.1。系统消息根据当前阶段注入 Annotator 或 Reviewer 的角色和职责。用户消息末尾包含按阶段和任务渲染的完整响应 Schema。模型指令、任务卡及模型撰写的解释和 QA 使用英文，原始陈述、引文和字符位置按来源保留。模板使用 StrictUndefined；变量缺失即报错。每条请求新建会话。
+标签标注与审核 Prompt 版本 1.1.2，QA Prompt 版本 1.1.1。系统消息根据当前阶段注入 Annotator 或 Reviewer 的角色和职责。用户消息末尾包含按阶段和任务渲染的完整响应 Schema。模型指令、任务卡及模型撰写的解释和 QA 使用英文，原始陈述、引文和字符位置按来源保留。模板使用 StrictUndefined；变量缺失即报错。每条请求新建会话。
 
 ## 组成与响应
 
@@ -21,6 +21,8 @@ text_reasoning 和 image_perception 的 OT/FT、OI/FI 由 manifest 产生 annota
 统一使用 `task_id`、`task_definition_json`、`task_instructions`、`target_claim_json`、`visible_input_json`、`response_schema_json`。它们均由白名单投影或合法配置生成。review_labels 另有 `candidate_annotation_json`；generate_qa 另有 `accepted_annotation_json`、`qa_policy_json`；review_qa 另有 `candidate_qa_json`、`solver_input_json`；verify_manipulation 另有 `operation_target_json` 和 `parent_input_json`。
 
 图片以模型多模态消息的 image 内容项实际附加，JSON 中的 asset ID 只做映射，不能只传本地路径然后假定模型看到了图。figure/asset ID 与实际图片排序须可核验。
+
+标签标注与审核的请求 Schema 将 `evidence_ids` 限制为本次可见证据列表中的正式 ID，列表为空时返回 `[]`。图片编号和文字细节可以写进 `rationale`。标注及审核建议的 `target_claim` 由输入值约束。
 
 `response_schema_json` 必须是从完整 schema 解析 `$ref` 后、针对当前 task_id 收紧标签枚举的 payload schema。推理后再次进行本地 schema 与语义校验。模板禁止要求模型填写数据库状态、人工资格或质量等级。
 

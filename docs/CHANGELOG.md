@@ -73,3 +73,7 @@ A800 部署文档统一使用 `MMFND/models` 作为模型目录，按精确 revi
 ## M2 并发请求
 
 `annotate` 和 `review-labels` 新增 `--workers`，默认使用 `runtime.workers_initial`。并发任务各用独立 SQLite 连接和原有租约，报告新增 `workers` 与 `elapsed_seconds`。SQLite 无需迁移。新版试跑使用新批次 ID，旧批次在原 Git 提交下完成。
+
+## 标签 Prompt 1.1.2
+
+标注、审核及其修订建议的请求 Schema 绑定可见证据 ID，标注及修订建议绑定固定目标主张。图片编号写进理由字段。新版批次独立记录，历史失败与原始响应保留。持久记录 Schema 与标签版本保持 1.0.0。

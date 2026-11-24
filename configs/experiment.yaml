@@ -70,7 +70,7 @@ splitting:
 
 annotation:
   tasks: [text_reasoning, image_perception, reality_plausibility, image_text_consistency, persuasion_strategy, intent_analysis]
-  prompt_version: "1.1.1"
+  prompt_version: "1.1.2"
   task_independent: true
   conversation_scope: sample_task_stage
   provenance_tasks: [text_reasoning, image_perception]

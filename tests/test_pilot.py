@@ -8,6 +8,8 @@ from threading import Barrier
 from unittest import TestCase
 from unittest.mock import patch
 
+from jsonschema import Draft202012Validator
+
 from rumorlab.cli import main
 from rumorlab.config import Contract
 from rumorlab.grouping import freeze_plan
@@ -123,7 +125,13 @@ class AnnotateTests(PilotFixture, TestCase):
             self.assertNotIn("source_veracity", messages)
             samples = [sample for sample in self.samples if sample["text"] in messages]
             self.assertEqual(len(samples), 1)
-            return self.payload(task, samples[0])
+            payload = self.payload(task, samples[0])
+            decoder = Draft202012Validator(schema)
+            decoder.validate(payload)
+            self.assertFalse(decoder.is_valid({**payload, "evidence_ids": ["image_1"]}))
+            changed_claim = {**payload["target_claim"], "text": "Changed caption"}
+            self.assertFalse(decoder.is_valid({**payload, "target_claim": changed_claim}))
+            return payload
 
         with self.transport(reply):
             first = self.command("annotate", workers=2)
@@ -183,7 +191,8 @@ class ReviewTests(PilotFixture, TestCase):
             "config_hash": self.contract.config_hash, "label_schema_version": self.contract.labels["label_schema_version"],
             "dataset_version": self.sample["source"]["dataset_version"], "evidence_version": "none",
             "split_manifest_id": "split_" + digest, "models": models, "seed": 42, "status": "RUNNING",
-            "prompt_versions": {"annotate": "1.1.1", "review_labels": "1.1.1"},
+            "prompt_versions": {stage: self.contract.experiment["annotation"]["prompt_version"]
+                                for stage in ("annotate", "review_labels")},
             "runtime": {"source_run_id": RUN, "batch_id": BATCH, "sample_count": 1,
                         "reviewer_lock_sha256": hashes["reviewer"]},
         }
@@ -194,7 +203,8 @@ class ReviewTests(PilotFixture, TestCase):
                 {"job_id": f"{index:064x}", "input_hash": f"{index:064x}", "payload": self.payload(task)},
                 self.sample, {"kind": "model", "role": "annotator", "model_id": models["annotator"]["model_id"],
                               "model_revision": REVISION, "run_id": manifest["run_id"],
-                              "prompt_version": "1.1.1", "prompt_hash": digest}, [], kind="annotation",
+                              "prompt_version": data["prompt_versions"]["annotate"], "prompt_hash": digest},
+                [], kind="annotation",
             )
             record["label_schema_version"] = self.contract.labels["label_schema_version"]
             records.append(record)

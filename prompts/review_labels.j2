@@ -7,6 +7,8 @@ Fixed target: {{ target_claim_json }}
 Allowed material: {{ visible_input_json }}
 Candidate: {{ candidate_annotation_json }}
 
+For your review and any suggested annotation, use only IDs from the supplied evidence list in evidence_ids. Return [] when that list is empty. Refer to the caption or to image_1 and other image positions in rationale. Copy the fixed target_claim exactly in any suggested annotation.
+
 Check the candidate's decisive cue against the supplied material and the closest competing interpretation. Treat the candidate's rationale as a claim to verify. For multiple labels, check each cue and any supported omission. Check applicability and the reason for UNKNOWN; an adequately justified UNKNOWN may pass. Route unresolved competing mechanisms or relations to NEEDS_HUMAN as specified in the guide.
 Use PASS for a supported candidate, NEEDS_HUMAN for a material evidence gap, ambiguity or a correctable error, and REJECT for an unusable record. Give a short, specific reason and existing evidence IDs. A suggestion is subject to subsequent verification.
 Response schema: {{ response_schema_json }}

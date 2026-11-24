@@ -6,5 +6,7 @@ Decision guide:
 Target claim (original text and Unicode code-point span): {{ target_claim_json }}
 Allowed material and evidence: {{ visible_input_json }}
 
+Use only IDs from the supplied evidence list in evidence_ids. If that list is empty, return "evidence_ids": []. Refer to the caption or to image_1 and other image positions in rationale. Copy target_claim exactly, including its text and span.
+
 Select the supported label or label set for this task alone. Anchor the rationale in a specific claim span, image detail or supplied evidence item. Use UNKNOWN alone where the task permits it and identify the missing fact or unresolved boundary in unknown_reason. Use not_applicable with empty labels only when the evidence establishes inapplicability. Preserve the target even when a different claim would be easier to label.
 Response schema: {{ response_schema_json }}

@@ -91,6 +91,20 @@ class RequestTests(TestCase):
         self.assertEqual(self.request("generate_qa", self.annotation).role, "annotator")
         self.assertEqual(self.request("review_qa", self.qa).role, "reviewer")
 
+    def test_label_stage_citations_use_only_visible_evidence_ids(self):
+        annotation = self.request("annotate")
+        visible, = annotation.visible_inputs["evidence"]
+        evidence_id = visible["evidence_id"]
+        payload = {**self.annotation["payload"], "evidence_ids": [evidence_id]}
+        jsonschema.Draft202012Validator(annotation.response_schema).validate(payload)
+        review = self.request("review_labels", self.annotation)
+        validator = jsonschema.Draft202012Validator(review.response_schema)
+        reply = {"decision": "NEEDS_HUMAN", "issue_codes": ["EVIDENCE_MISSING"], "rationale": "Inspect the image.",
+                 "evidence_ids": [evidence_id], "suggested_annotation": payload, "suggested_qa_revision": None}
+        validator.validate(reply)
+        self.assertFalse(validator.is_valid({**reply, "evidence_ids": ["image_1"]}))
+        self.assertFalse(validator.is_valid({**reply, "suggested_annotation": {**payload, "evidence_ids": ["image_1"]}}))
+
     def test_messages_identify_role_and_include_actual_output_schema(self):
         for stage, role, candidate in (
             ("annotate", "Annotator", None), ("review_labels", "Reviewer", self.annotation),

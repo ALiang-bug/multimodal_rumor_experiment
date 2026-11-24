@@ -94,6 +94,18 @@ def build_request(contract, stage, task_id, sample, claim, evidence, media_root,
     solver = stage in {"generate_qa", "review_qa"}
     material, images = visible_material(sample, evidence, media_root, solver=solver)
     schema = _response_schema(contract, definition, task_id)
+    if stage in {"annotate", "review_labels"}:
+        evidence_ids = [item["evidence_id"] for item in material["evidence"]]
+        citation_schema = (
+            {"type": "array", "items": {"enum": evidence_ids}, "uniqueItems": True}
+            if evidence_ids else {"const": []}
+        )
+        properties = schema["properties"]
+        properties["evidence_ids"] = citation_schema
+        if stage == "review_labels":
+            properties = properties["suggested_annotation"]["anyOf"][0]["properties"]
+            properties["evidence_ids"] = citation_schema
+        properties["target_claim"] = {"const": claim}
     environment = Environment(
         loader=FileSystemLoader(contract.root / "prompts"),
         undefined=StrictUndefined, autoescape=False,

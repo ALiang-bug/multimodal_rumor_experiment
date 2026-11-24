@@ -91,7 +91,9 @@ class PipelineTests(TestCase):
             ("timeout", TimeoutError("fixture timeout"), "technical", 3),
             ("json", "{broken", "format", 2),
             ("mixed", {**payload, "labels": ["UNKNOWN", "AUTHORITY"]}, "format", 2),
-            ("citation", {**payload, "evidence_ids": ["missing"]}, "semantic", 1),
+            ("citation", {**payload, "evidence_ids": ["missing"]}, "format", 2),
+            ("applicability", {**payload, "applicability": "not_applicable", "labels": [],
+                               "unknown_reason": None}, "semantic", 1),
         ]
         with TemporaryDirectory() as directory:
             state = State(Path(directory) / "state.db")
