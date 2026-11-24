@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 import shutil
 from tempfile import TemporaryDirectory
+from threading import Barrier
 from unittest import TestCase
 from unittest.mock import patch
 
@@ -70,11 +71,13 @@ class PilotFixture:
             mock.start()
             self.addCleanup(mock.stop)
 
-    def command(self, stage, *, expected=0):
+    def command(self, stage, *, expected=0, workers=None):
         args = ["rumorlab", stage, "--run-id", RUN, "--batch-id", BATCH, "--config", str(CONFIG),
                 "--state-db", str(self.db_path), "--reviewer-lock", str(self.locks["reviewer"])]
         if stage == "annotate":
             args += ["--annotator-lock", str(self.locks["annotator"]), "--limit", "1"]
+        if workers is not None:
+            args += ["--workers", str(workers)]
         out, err = StringIO(), StringIO()
         with patch("sys.argv", args), redirect_stdout(out), redirect_stderr(err):
             self.assertEqual(main(), expected, err.getvalue() or out.getvalue())
@@ -107,7 +110,10 @@ class PilotFixture:
 
 class AnnotateTests(PilotFixture, TestCase):
     def test_real_command_limits_work_and_resumes_without_another_generation(self):
+        overlap = Barrier(2, timeout=5)
+
         def reply(body):
+            overlap.wait()
             schema = body["response_format"]["json_schema"]["schema"]
             task = schema["properties"]["task_id"]["const"]
             self.assertNotIn("allOf", schema)
@@ -120,9 +126,11 @@ class AnnotateTests(PilotFixture, TestCase):
             return self.payload(task, samples[0])
 
         with self.transport(reply):
-            first = self.command("annotate")
+            first = self.command("annotate", workers=2)
             rerun = self.command("annotate")
-        self.assertEqual((first["samples"], first["failed"], len(self.calls)), (1, 0, 4))
+        self.assertEqual((first["samples"], first["workers"], first["failed"], len(self.calls)), (1, 2, 0, 4))
+        self.assertEqual(rerun["workers"], 1)
+        self.assertEqual([row["task_id"] for row in first["results"] if row["task_id"] in TASK_LABELS], list(TASK_LABELS))
         self.assertTrue(all(row["cached"] for row in rerun["results"]))
         records = self.export()
         labels = [record for record in records if record["record_type"] == "annotation"]
@@ -160,7 +168,7 @@ class AnnotateTests(PilotFixture, TestCase):
 
 
 class ReviewTests(PilotFixture, TestCase):
-    def seed_annotation(self):
+    def seed_annotations(self, *tasks):
         digest, _ = freeze_plan(self.state, RUN, self.samples, self.contract.experiment["splitting"])
         models, hashes = {}, {}
         for role, path in self.locks.items():
@@ -180,28 +188,31 @@ class ReviewTests(PilotFixture, TestCase):
                         "reviewer_lock_sha256": hashes["reviewer"]},
         }
         manifest = {**record_envelope("run_manifest", data, digest, is_mock=False), **data}
-        record = stage_record(
-            {"job_id": "a" * 64, "input_hash": digest, "payload": self.payload("image_text_consistency")},
-            self.sample, {"kind": "model", "role": "annotator", "model_id": models["annotator"]["model_id"],
-                          "model_revision": REVISION, "run_id": manifest["run_id"],
-                          "prompt_version": "1.1.1", "prompt_hash": digest}, [], kind="annotation",
-        )
-        record["label_schema_version"] = self.contract.labels["label_schema_version"]
+        records = []
+        for index, task in enumerate(tasks or ("image_text_consistency",), start=1):
+            record = stage_record(
+                {"job_id": f"{index:064x}", "input_hash": f"{index:064x}", "payload": self.payload(task)},
+                self.sample, {"kind": "model", "role": "annotator", "model_id": models["annotator"]["model_id"],
+                              "model_revision": REVISION, "run_id": manifest["run_id"],
+                              "prompt_version": "1.1.1", "prompt_hash": digest}, [], kind="annotation",
+            )
+            record["label_schema_version"] = self.contract.labels["label_schema_version"]
+            records.append(record)
         with self.state.db:
             self.state.db.execute(
                 "INSERT INTO pilot_batches VALUES (?, ?, ?, ?, ?, NULL)",
                 (RUN, BATCH, manifest["run_id"], json.dumps(manifest), json.dumps({
-                    "failed": 0, "results": [{"status": "VALIDATED", "record_id": record["annotation_id"]}],
+                    "failed": 0, "results": [{"status": "VALIDATED", "record_id": row["annotation_id"]} for row in records],
                 })),
             )
-            self.state.db.execute(
+            self.state.db.executemany(
                 "INSERT INTO pilot_records VALUES (?, ?, ?)",
-                (manifest["run_id"], record["annotation_id"], json.dumps(record)),
+                [(manifest["run_id"], row["annotation_id"], json.dumps(row)) for row in records],
             )
-        return record
+        return records
 
     def test_reviews_saved_candidate_and_projects_silver_without_rewriting_it(self):
-        candidate = self.seed_annotation()
+        candidate, = self.seed_annotations()
 
         def reply(body):
             self.assertEqual(body["model"], "google/gemma-4-31B-it")
@@ -225,10 +236,26 @@ class ReviewTests(PilotFixture, TestCase):
         self.assertEqual((annotation["status"], annotation["quality_tier"]), ("VALIDATED", "unresolved"))
 
     def test_structural_decoder_does_not_bypass_local_conditional_validation(self):
-        self.seed_annotation()
+        self.seed_annotations()
         with self.transport(lambda _: {"decision": "PASS", "issue_codes": ["INSUFFICIENT_EVIDENCE"],
                                        "rationale": "Invalid PASS.", "evidence_ids": [],
                                        "suggested_annotation": None, "suggested_qa_revision": None}):
             result = self.command("review-labels", expected=1)
         self.assertEqual((result["failed"], result["results"][0]["category"], len(self.calls)), (1, "format", 2))
         self.assertFalse(any(row["record_type"] == "review" for row in self.export()))
+
+    def test_reviews_two_candidates_concurrently(self):
+        candidates = self.seed_annotations("image_text_consistency", "intent_analysis")
+        overlap = Barrier(2, timeout=5)
+
+        def reply(_):
+            overlap.wait()
+            return {"decision": "PASS", "issue_codes": [], "rationale": "Review fixture.",
+                    "evidence_ids": [], "suggested_annotation": None, "suggested_qa_revision": None}
+
+        with self.transport(reply):
+            report = self.command("review-labels", workers=2)
+        self.assertEqual((report["workers"], report["failed"], len(self.calls)), (2, 0, 2))
+        reviews = [row for row in self.export() if row["record_type"] == "review"]
+        self.assertEqual({(row["target_id"], row["target_content_hash"]) for row in reviews},
+                         {(row["annotation_id"], row["content_hash"]) for row in candidates})

@@ -149,4 +149,8 @@ REVIEWER_BASE_URL=http://127.0.0.1:8000/v1 \
 
 Reviewer 只读取同一批次持久化且通过验证的模型候选。PASS 对原候选投影 silver，NEEDS_HUMAN 和 REJECT 分别投影待人工和排除。更改代码、锁或输入后使用新的 `--batch-id`。两阶段均只接受 MMFakeBench val。vLLM 解码使用结构和任务枚举约束，完整的条件式 Schema 保留在 Prompt 和本地校验中。
 
+两个阶段均可加 `--workers 2` 并发发送独立模型请求。对应角色的 vLLM 服务启动参数也要从 `--max-num-seqs 1` 改成 `--max-num-seqs 2`。单卡上仍按角色切换服务。先完成正在运行的旧提交批次，再更新代码并使用新的 `--batch-id` 做并发试跑。
+
+比较吞吐时，在同一提交上用相同 `--run-id`、`--limit` 和模型锁，分别用两个新批次执行 `--workers 1` 和 `--workers 2`。报告中的 `workers` 为本次并发上限，`elapsed_seconds` 为本阶段墙钟耗时。比较前确认两份报告的任务数、失败数和缓存命中情况。恢复同一批次时可降低 `--workers`，已成功任务会复用。
+
 用 `python -m rumorlab export-snapshot --run-id mmfakebench-val-import-smoke-12` 导出源样本及该导入批次的当前标注与审核记录。

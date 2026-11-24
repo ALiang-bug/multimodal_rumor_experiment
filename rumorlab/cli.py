@@ -71,6 +71,7 @@ def main():
         command.add_argument("--batch-id", required=True, help="Versioned pilot batch within the snapshot")
         command.add_argument("--reviewer-lock", required=True, type=Path)
         command.add_argument("--state-db", type=Path)
+        command.add_argument("--workers", type=int, help="Maximum concurrent model requests")
     annotate.add_argument("--limit", required=True, type=int)
     annotate.add_argument("--annotator-lock", required=True, type=Path)
     invalidate = commands.add_parser("invalidate", help="Retire a version and invalidate its downstream jobs")
@@ -106,13 +107,17 @@ def main():
             from .pilot import annotate as run_annotation, review_labels as run_review
             from .state import State
 
+            workers = args.workers if args.workers is not None else contract.experiment["runtime"]["workers_initial"]
+            if type(workers) is not int or workers < 1:
+                raise ValueError("--workers must be a positive integer")
             state = State(args.state_db or contract.root / contract.experiment["paths"]["state_db"])
             try:
                 if args.command == "annotate":
                     report = run_annotation(state, contract, args.run_id, args.batch_id, args.limit,
-                                            args.annotator_lock, args.reviewer_lock)
+                                            args.annotator_lock, args.reviewer_lock, workers=workers)
                 else:
-                    report = run_review(state, contract, args.run_id, args.batch_id, args.reviewer_lock)
+                    report = run_review(state, contract, args.run_id, args.batch_id, args.reviewer_lock,
+                                        workers=workers)
             finally:
                 state.close()
             print(json.dumps(report, ensure_ascii=False))

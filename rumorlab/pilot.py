@@ -1,9 +1,12 @@
 """Run the independent label stages on a bounded MMFakeBench val batch."""
 
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing
 import json
 from pathlib import Path
 import re
 import subprocess
+from time import monotonic
 
 from .grouping import apply_plan, freeze_plan
 from .m1 import connect_role, load_lock
@@ -11,6 +14,7 @@ from .pipeline import JobFailed, execute
 from .provenance import run_source_tasks
 from .records import record_envelope, stage_record
 from .requests import build_request
+from .state import State
 from .validation import ID_FIELDS, canonical_hash
 
 
@@ -114,10 +118,30 @@ def _model_job(state, contract, client, manifest, stage, sample, claim, task, ev
             **({"decision": record["payload"]["decision"]} if target else {})}
 
 
-def _finish(state, manifest, stage, results):
+def _run_model_jobs(state, contract, client, manifest, stage, evidence, media_root, jobs, workers):
+    if workers == 1:
+        return [_model_job(state, contract, client, manifest, stage, sample, claim, task, evidence,
+                           media_root, target) for sample, claim, task, target in jobs]
+
+    def run(job):
+        sample, claim, task, target = job
+        # SQLite connections are thread-local, while requests wait outside write transactions.
+        with closing(State(state.path)) as worker_state:
+            return _model_job(worker_state, contract, client, manifest, stage, sample, claim, task,
+                              evidence, media_root, target)
+
+    executor = ThreadPoolExecutor(max_workers=workers)
+    try:
+        return list(executor.map(run, jobs))
+    finally:
+        executor.shutdown(cancel_futures=True)
+
+
+def _finish(state, manifest, stage, results, workers, started):
     report = {"stage": stage, "run_id": manifest["runtime"]["source_run_id"],
               "batch_id": manifest["runtime"]["batch_id"], "manifest_id": manifest["run_id"],
               "samples": manifest["runtime"]["sample_count"], "results": results,
+              "workers": workers, "elapsed_seconds": round(monotonic() - started, 3),
               "failed": sum(item["status"] == "FAILED" for item in results)}
     with state.db:
         if stage == "annotate":
@@ -129,7 +153,8 @@ def _finish(state, manifest, stage, results):
     return report
 
 
-def annotate(state, contract, run_id, batch_id, limit, annotator_lock, reviewer_lock):
+def annotate(state, contract, run_id, batch_id, limit, annotator_lock, reviewer_lock, *, workers=1):
+    started = monotonic()
     existing = _batch(state, run_id, batch_id)
     row, source, records, samples, evidence = _inputs(state, run_id)
     if not 1 <= limit <= len(samples):
@@ -173,7 +198,7 @@ def annotate(state, contract, run_id, batch_id, limit, annotator_lock, reviewer_
                    for role, (lock, _) in locks.items()},
         "prompt_versions": {stage: contract.experiment["annotation"]["prompt_version"]
                             for stage in ("annotate", "review_labels")},
-        "runtime": {"source_run_id": run_id, "batch_id": batch_id, "sample_count": limit, "workers": 1,
+        "runtime": {"source_run_id": run_id, "batch_id": batch_id, "sample_count": limit, "workers": workers,
                     "decoding_schema": "structural-with-task-enums; full schema validated locally",
                     **{f"{role}_lock_sha256": digest for role, (_, digest) in locks.items()}},
         "seed": contract.experiment["seed"], "status": "RUNNING",
@@ -196,15 +221,14 @@ def annotate(state, contract, run_id, batch_id, limit, annotator_lock, reviewer_
     )
     for record in output:
         _save_record(state, contract, record)
-    for sample in selected:
-        for claim in sample["target_claims"]:
-            for task in tasks:
-                results.append(_model_job(state, contract, client, manifest, "annotate", sample, claim, task,
-                                          evidence, Path(row["media_root"])))
-    return _finish(state, manifest, "annotate", results)
+    jobs = ((sample, claim, task, None) for sample in selected for claim in sample["target_claims"] for task in tasks)
+    results.extend(_run_model_jobs(state, contract, client, manifest, "annotate", evidence,
+                                  Path(row["media_root"]), jobs, workers))
+    return _finish(state, manifest, "annotate", results, workers, started)
 
 
-def review_labels(state, contract, run_id, batch_id, reviewer_lock):
+def review_labels(state, contract, run_id, batch_id, reviewer_lock, *, workers=1):
+    started = monotonic()
     batch = _batch(state, run_id, batch_id)
     if batch is None or batch["annotate_report"] is None:
         raise ValueError("Finish annotate for this --run-id and --batch-id before reviewing")
@@ -221,11 +245,12 @@ def review_labels(state, contract, run_id, batch_id, reviewer_lock):
         raise ValueError("No validated model annotations available for review")
     _check_budget(contract, "reviewer", len(ids))
     client = connect_role(contract, "reviewer")
-    results = []
+    jobs = []
     for record_id in ids:
         record = state.db.execute("SELECT record FROM pilot_records WHERE record_id = ?", (record_id,)).fetchone()
         target = json.loads(record["record"])
         claim, task = target["payload"]["target_claim"], target["payload"]["task_id"]
-        results.append(_model_job(state, contract, client, manifest, "review_labels", samples[target["sample_id"]],
-                                  claim, task, evidence, Path(row["media_root"]), target))
-    return _finish(state, manifest, "review_labels", results)
+        jobs.append((samples[target["sample_id"]], claim, task, target))
+    results = _run_model_jobs(state, contract, client, manifest, "review_labels", evidence,
+                              Path(row["media_root"]), jobs, workers)
+    return _finish(state, manifest, "review_labels", results, workers, started)

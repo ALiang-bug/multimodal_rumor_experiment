@@ -128,3 +128,8 @@ Prompt 1.1.1 已在四阶段渲染结果中核验系统角色声明，以及用�
 - `annotate` 接通固定 Qwen 端点，按明确的 val 样本上限，独立执行四个模型任务并派生两项来源标签。SQLite 保存模型响应、候选、工作项状态和版本化批次清单。
 - `review-labels` 接通固定 Gemma 端点，读取同批次已验证的模型候选。审核绑定候选内容哈希，PASS 投影为 silver，NEEDS_HUMAN 和 REJECT 分别进入待人工和排除。两个阶段在单卡上顺序运行。
 - 使用替身 HTTP 响应单独执行了 `AnnotateTests` 与 `ReviewTests`，分别 3 项和 2 项通过。受影响的 vLLM、pipeline 和 SQLite state 模块共 12 项通过。两角色真实端点的已有 M1 结果只覆盖探针，M2 数据试跑待服务器执行。
+
+### M2 并发请求
+
+- 按现有六维任务定义、独立 Prompt 和 SQLite 租约实现可选 `--workers`。单卡仍分别运行 Qwen 和 Gemma。默认串行，报告记录实际设置与墙钟耗时。
+- 使用替身 HTTP 响应分别验证 Annotator 和 Reviewer 的双请求重叠、结果持久化及原有验证流程。Annotator 覆盖从双工作线程切回单工作线程时的缓存复用。A800 上的吞吐提升待实测。

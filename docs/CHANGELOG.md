@@ -69,3 +69,7 @@ QA 生成与审核使用 QA 格式修复限额和通用格式限额中较小的�
 新增 vLLM 适配器和 `preflight --mode real`。按角色核对本地快照锁和端点名称，探针结果包含图片哈希、耗时、结构校验和 reasoning 分离状态。
 
 A800 部署文档统一使用 `MMFND/models` 作为模型目录，按精确 revision 下载并定位 Hugging Face 快照。
+
+## M2 并发请求
+
+`annotate` 和 `review-labels` 新增 `--workers`，默认使用 `runtime.workers_initial`。并发任务各用独立 SQLite 连接和原有租约，报告新增 `workers` 与 `elapsed_seconds`。SQLite 无需迁移。新版试跑使用新批次 ID，旧批次在原 Git 提交下完成。

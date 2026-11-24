@@ -10,6 +10,7 @@ from .validation import canonical_hash
 
 class State:
     def __init__(self, path):
+        self.path = path
         path.parent.mkdir(parents=True, exist_ok=True)
         self.db = sqlite3.connect(path, timeout=30)
         self.db.row_factory = sqlite3.Row
