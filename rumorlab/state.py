@@ -28,6 +28,17 @@ class State:
             CREATE TABLE IF NOT EXISTS mock_exports (
                 run_id TEXT PRIMARY KEY, records TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS pilot_batches (
+                source_run_id TEXT NOT NULL REFERENCES imports(run_id), batch_id TEXT NOT NULL,
+                manifest_id TEXT NOT NULL UNIQUE, manifest TEXT NOT NULL,
+                annotate_report TEXT, review_report TEXT,
+                PRIMARY KEY (source_run_id, batch_id)
+            );
+            CREATE TABLE IF NOT EXISTS pilot_records (
+                manifest_id TEXT NOT NULL REFERENCES pilot_batches(manifest_id),
+                record_id TEXT PRIMARY KEY, record TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS pilot_records_by_manifest ON pilot_records(manifest_id);
             CREATE TABLE IF NOT EXISTS human_submissions (
                 run_id TEXT NOT NULL, record_id TEXT NOT NULL, record TEXT NOT NULL,
                 PRIMARY KEY (run_id, record_id)

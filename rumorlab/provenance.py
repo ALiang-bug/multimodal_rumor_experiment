@@ -44,7 +44,10 @@ def run_source_tasks(state, contract, samples, evidence, split_dependency, manif
                 contract.validator("annotation_payload").validate(payload)
                 deps = [(sample["sample_id"], sample["content_hash"]), split_dependency]
                 deps.extend((eid, evidence_hashes[eid]) for eid in payload["evidence_ids"])
-                input_hash = canonical_hash([contract.config_hash, "manifest", payload])
+                identity = [contract.config_hash, "manifest", payload]
+                if not sample["is_mock"]:
+                    identity.append(manifest["run_id"])
+                input_hash = canonical_hash(identity)
                 job_id, lease, cached = state.claim(
                     "annotate", sample["sample_id"], task, input_hash,
                     deps, contract.experiment["runtime"]["lease_seconds"],
@@ -57,7 +60,8 @@ def run_source_tasks(state, contract, samples, evidence, split_dependency, manif
                         "content_hash": canonical_hash(payload), "payload": payload,
                     })
                 record = stage_record(
-                    {"payload": payload, "input_hash": input_hash, "job_id": job_id}, sample,
+                    {"payload": payload, "input_hash": input_hash, "job_id": job_id,
+                     "created_at": manifest["created_at"]}, sample,
                     {"kind": "manifest", "role": "system", "model_id": None, "model_revision": None,
                      "run_id": manifest["run_id"], "prompt_version": None, "prompt_hash": None},
                     payload["evidence_ids"], kind="annotation",

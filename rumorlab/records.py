@@ -1,18 +1,22 @@
-"""Build contract records from persisted mock responses."""
+"""Build contract records from persisted workflow results."""
 
 from datetime import datetime, timezone
 
 from .validation import ID_FIELDS, canonical_hash
 
 
-def mock_envelope(kind, payload, input_hash):
+def record_envelope(kind, payload, input_hash, *, is_mock):
     return {
-        "schema_version": "1.0.0", "record_type": kind, "is_mock": True,
-        "mock_note": "Scripted offline workflow output.",
+        "schema_version": "1.0.0", "record_type": kind, "is_mock": is_mock,
+        "mock_note": "Scripted offline workflow output." if is_mock else None,
         "created_at": datetime.now(timezone.utc).isoformat(),
         "record_version": 1, "supersedes_id": None, "input_hash": input_hash,
         "content_hash": canonical_hash(payload),
     }
+
+
+def mock_envelope(kind, payload, input_hash):
+    return record_envelope(kind, payload, input_hash, is_mock=True)
 
 
 def mock_manifest(contract, run_id, split_id):
@@ -39,7 +43,7 @@ def mock_manifest(contract, run_id, split_id):
 def stage_record(result, sample, producer, evidence_ids, *, kind, target=None, solver=None):
     payload = result["payload"]
     record = {
-        **mock_envelope(kind, payload, result["input_hash"]),
+        **record_envelope(kind, payload, result["input_hash"], is_mock=sample["is_mock"]),
         ID_FIELDS[kind]: f"{kind}_" + result["job_id"],
         "payload": payload, "producer": producer, "available_evidence_ids": evidence_ids,
     }

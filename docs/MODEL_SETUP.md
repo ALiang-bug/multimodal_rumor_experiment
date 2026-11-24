@@ -124,3 +124,29 @@ python -m rumorlab ingest --adapter mmfakebench --run-id mmfakebench-val \
 ```
 
 探针检查纯文本、两次同文异图、双图交换顺序、最终 JSON 和独立 reasoning 字段，报告耗时和 token 用量。记录的 processor 配置来自本地快照，旋转方向和实际视觉 token 预算仍需实测。两个颜色探针报告只能作为 M1 接口结果，真实标注和人工质量评估属于后续步骤。
+
+## M2 标注与审核试跑
+
+在项目目录、已激活的 `rumorlab-m1` 环境中运行。两个阶段使用同一已导入的官方 val 批次、同一 Git 提交与同一 SQLite 状态库。以已导入的 12 条分层样本为例，先启动 Qwen，再执行：
+
+```bash
+ANNOTATOR_BASE_URL=http://127.0.0.1:8000/v1 \
+  python -m rumorlab annotate --run-id mmfakebench-val-import-smoke-12 \
+    --batch-id m2-pilot-01 --limit 12 \
+    --annotator-lock runs/m1-qwen/model_lock.json \
+    --reviewer-lock runs/m1-gemma/model_lock.json
+```
+
+标注对每个目标生成四个独立模型任务的候选，另从制作来源记录生成 OT/FT 与 OI/FI。成功任务在同一批次重跑时复用。报告中的 `failed` 为失败任务数，`SKIPPED` 表示按规则不适用。运行清单冻结模型锁摘要、初始数据、样本选择、划分与代码提交。
+
+停止 Qwen，启动 Gemma 后执行：
+
+```bash
+REVIEWER_BASE_URL=http://127.0.0.1:8000/v1 \
+  python -m rumorlab review-labels --run-id mmfakebench-val-import-smoke-12 \
+    --batch-id m2-pilot-01 --reviewer-lock runs/m1-gemma/model_lock.json
+```
+
+Reviewer 只读取同一批次持久化且通过验证的模型候选。PASS 对原候选投影 silver，NEEDS_HUMAN 和 REJECT 分别投影待人工和排除。更改代码、锁或输入后使用新的 `--batch-id`。两阶段均只接受 MMFakeBench val。vLLM 解码使用结构和任务枚举约束，完整的条件式 Schema 保留在 Prompt 和本地校验中。
+
+用 `python -m rumorlab export-snapshot --run-id mmfakebench-val-import-smoke-12` 导出源样本及该导入批次的当前标注与审核记录。

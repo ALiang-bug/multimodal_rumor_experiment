@@ -1,4 +1,4 @@
-"""Command-line entry points for the offline contract."""
+"""Command-line entry points for the experiment."""
 
 import argparse
 import json
@@ -64,6 +64,15 @@ def main():
     smoke.add_argument("--state-db", type=Path)
     smoke.add_argument("--script", type=Path, help="JSONL of sample, claim, task and scripted responses")
     smoke.add_argument("--provenance", action="store_true", help="Also derive source labels from the manifest")
+    annotate = commands.add_parser("annotate", help="Annotate a bounded MMFakeBench val batch")
+    review_labels = commands.add_parser("review-labels", help="Review the saved annotations of a val batch")
+    for command in (annotate, review_labels):
+        command.add_argument("--run-id", required=True, help="Imported val snapshot")
+        command.add_argument("--batch-id", required=True, help="Versioned pilot batch within the snapshot")
+        command.add_argument("--reviewer-lock", required=True, type=Path)
+        command.add_argument("--state-db", type=Path)
+    annotate.add_argument("--limit", required=True, type=int)
+    annotate.add_argument("--annotator-lock", required=True, type=Path)
     invalidate = commands.add_parser("invalidate", help="Retire a version and invalidate its downstream jobs")
     invalidate.add_argument("--record-id", required=True)
     invalidate.add_argument("--content-hash", required=True)
@@ -87,11 +96,27 @@ def main():
         command.add_argument("--state-db", type=Path)
         command.add_argument("--confirmed-links", type=Path)
         grouping_commands.append(command)
-    for command in (preflight, validate, release, audit, evaluate, qa_eval, import_data, smoke, invalidate, export, human, blind, *grouping_commands):
+    for command in (preflight, validate, release, audit, evaluate, qa_eval, import_data, smoke, annotate,
+                    review_labels, invalidate, export, human, blind, *grouping_commands):
         command.add_argument("--config", default="configs/experiment.yaml", type=Path)
     args = parser.parse_args()
     try:
         contract = Contract(args.config)
+        if args.command in {"annotate", "review-labels"}:
+            from .pilot import annotate as run_annotation, review_labels as run_review
+            from .state import State
+
+            state = State(args.state_db or contract.root / contract.experiment["paths"]["state_db"])
+            try:
+                if args.command == "annotate":
+                    report = run_annotation(state, contract, args.run_id, args.batch_id, args.limit,
+                                            args.annotator_lock, args.reviewer_lock)
+                else:
+                    report = run_review(state, contract, args.run_id, args.batch_id, args.reviewer_lock)
+            finally:
+                state.close()
+            print(json.dumps(report, ensure_ascii=False))
+            return 1 if report["failed"] else 0
         if args.command in {"audit", "evaluate"}:
             from .audit import draw_audit, reviewer_metrics
 
@@ -242,6 +267,6 @@ def main():
             return 0
         print(f"Validated {len(rows)} records and {len(paths)} media paths.")
         return 0
-    except (OSError, ValueError, KeyError, jsonschema.SchemaError, yaml.YAMLError) as exc:
+    except (OSError, ValueError, KeyError, jsonschema.SchemaError, jsonschema.ValidationError, yaml.YAMLError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 1

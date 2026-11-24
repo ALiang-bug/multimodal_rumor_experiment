@@ -12,6 +12,24 @@ from jsonschema import Draft202012Validator
 from .models import ModelResponse
 
 
+def _label_decoding_schema(schema, task_id):
+    # Keep conditional cross-field rules in the prompt and strict local validation.
+    result = {key: value for key, value in schema.items() if key not in {"allOf", "uniqueItems"}}
+    if "pattern" in result and ("minLength" in result or "maxLength" in result):
+        del result["pattern"]
+    if "properties" in schema:
+        properties = dict(schema["properties"])
+        for rule in schema.get("allOf", ()):
+            if rule.get("if", {}).get("properties", {}).get("task_id", {}).get("const") == task_id:
+                properties.update(rule["then"]["properties"])
+        result["properties"] = {key: _label_decoding_schema(value, task_id) for key, value in properties.items()}
+    if "items" in schema:
+        result["items"] = _label_decoding_schema(schema["items"], task_id)
+    if "anyOf" in schema:
+        result["anyOf"] = [_label_decoding_schema(value, task_id) for value in schema["anyOf"]]
+    return result
+
+
 class NoRedirects(HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         return None
@@ -64,10 +82,13 @@ class VllmModel:
         generation = dict(self.settings["generation"])
         generation.pop("thinking")
         generation["max_tokens"] = generation.pop("max_output_tokens")
+        decoding_schema = request.response_schema
+        if request.stage in {"annotate", "review_labels"}:
+            decoding_schema = _label_decoding_schema(decoding_schema, request.task_id)
         body = {
             **generation, "model": self.settings["model_id"], "messages": messages,
             "stream": False, "response_format": {"type": "json_schema", "json_schema": {
-                "name": "rumorlab_response", "schema": request.response_schema,
+                "name": "rumorlab_response", "schema": decoding_schema,
             }},
         }
         started = monotonic()

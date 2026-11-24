@@ -22,6 +22,21 @@ def snapshot_records(state, run_id, *, gold_votes=3):
         )}
         split = state.db.execute("SELECT plan FROM split_plans WHERE run_id = ?", (run_id,)).fetchone()
         generated = state.db.execute("SELECT records FROM mock_exports WHERE run_id = ?", (run_id,)).fetchone()
+        batches = state.db.execute(
+            "SELECT * FROM pilot_batches WHERE source_run_id = ? ORDER BY batch_id", (run_id,),
+        ).fetchall()
+        pilot = []
+        for batch in batches:
+            manifest = json.loads(batch["manifest"])
+            reports = [json.loads(batch[key]) for key in ("annotate_report", "review_report") if batch[key]]
+            if any(report["failed"] for report in reports):
+                manifest["status"] = "FAILED"
+            elif len(reports) == 2:
+                manifest["status"] = "COMPLETED"
+            pilot.append(manifest)
+            pilot.extend(json.loads(row["record"]) for row in state.db.execute(
+                "SELECT record FROM pilot_records WHERE manifest_id = ? ORDER BY record_id", (batch["manifest_id"],),
+            ))
         stale_jobs = {row["id"] for row in state.db.execute("SELECT id FROM jobs WHERE state = 'STALE'")}
         human = [json.loads(row["record"]) for row in state.db.execute(
             "SELECT record FROM human_submissions WHERE run_id = ? ORDER BY record_id", (run_id,),
@@ -29,6 +44,7 @@ def snapshot_records(state, run_id, *, gold_votes=3):
     records = json.loads(snapshot["records"])
     if generated:
         records.extend(json.loads(generated["records"]))
+    records.extend(pilot)
     records.extend(human)
     if split:
         apply_plan(records, json.loads(split["plan"]))
@@ -50,7 +66,7 @@ def snapshot_records(state, run_id, *, gold_votes=3):
         for parent in parents:
             dependents[parent].add(rid)
     stale = {rid for rid, row in by_id.items() if (rid, row["content_hash"]) in retired}
-    if generated:
+    if generated or pilot:
         stale.update(rid for rid in by_id if rid.partition("_")[2] in stale_jobs)
     pending = deque(stale)
     while pending:
@@ -66,5 +82,15 @@ def snapshot_records(state, run_id, *, gold_votes=3):
             row["status"] = "EXCLUDED"
         elif kind == "run_manifest":
             row["status"] = "FAILED"
+    for review in pilot:
+        if review["record_type"] != "review" or review["status"] != "COMPLETED":
+            continue
+        target = by_id[review["target_id"]]
+        if target["status"] != "VALIDATED" or target["content_hash"] != review["target_content_hash"]:
+            continue
+        decision = review["payload"]["decision"]
+        target["status"] = {"PASS": "ACCEPTED_SILVER", "NEEDS_HUMAN": "HUMAN_PENDING", "REJECT": "EXCLUDED"}[decision]
+        target["quality_tier"] = "silver" if decision == "PASS" else "unresolved"
+        target["review_ids"].append(review["review_id"])
     project_gold(records, gold_votes)
     return records

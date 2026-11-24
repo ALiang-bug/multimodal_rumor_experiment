@@ -1,4 +1,4 @@
-"""Execute and resume the four stages of the bundled offline smoke run."""
+"""Execute version-bound model jobs and the bundled offline smoke run."""
 
 from dataclasses import asdict
 from datetime import datetime, timezone
@@ -14,6 +14,12 @@ from .records import mock_manifest, stage_record
 from .validation import canonical_hash
 
 
+class JobFailed(ValueError):
+    def __init__(self, request, job_id):
+        super().__init__(f"Job failed: {request.stage}/{request.task_id} ({job_id})")
+        self.job_id = job_id
+
+
 def execute(state, contract, request, subject, dependencies, client, *, script_hash, claim=None, labels=None):
     settings = contract.experiment["runtime"]
     input_hash = canonical_hash([request.request_id, script_hash])
@@ -25,7 +31,7 @@ def execute(state, contract, request, subject, dependencies, client, *, script_h
         if cached is not None:
             return cached, True
         if lease is None:
-            raise ValueError(f"Job failed: {request.stage}/{request.task_id} ({job_id})")
+            raise JobFailed(request, job_id)
         response = client.generate(request)
         category = None
         if response.technical_error:
@@ -44,9 +50,10 @@ def execute(state, contract, request, subject, dependencies, client, *, script_h
             if suggested:
                 cites.update(suggested["evidence_ids"])
             invalid = not cites <= visible
-            if request.stage == "annotate":
-                invalid |= payload["target_claim"] != claim
-                invalid |= payload["applicability"] == "not_applicable" and request.task_id != "reality_plausibility"
+            annotation = payload if request.stage == "annotate" else suggested
+            if annotation is not None and request.stage in {"annotate", "review_labels"}:
+                invalid |= (request.stage == "annotate" or claim is not None) and annotation["target_claim"] != claim
+                invalid |= annotation["applicability"] == "not_applicable" and request.task_id != "reality_plausibility"
             if request.stage == "generate_qa":
                 try:
                     project_options(payload, seed=contract.experiment["seed"], qa_id=request.request_id)

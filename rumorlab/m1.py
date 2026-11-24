@@ -60,7 +60,7 @@ def record_lock(contract, role, snapshot, lock_path):
     return lock
 
 
-def run_smoke(contract, role, lock_path):
+def load_lock(contract, role, lock_path):
     settings = contract.models["models"][role]
     lock_data = lock_path.read_bytes()
     lock = json.loads(lock_data)
@@ -73,12 +73,24 @@ def run_smoke(contract, role, lock_path):
     for key in ("revision", "processor_revision"):
         if not re.fullmatch(r"[0-9a-f]{40}", lock[key]):
             raise ValueError(f"Model lock requires an immutable {key}")
+    return lock, _sha(lock_data)
+
+
+def connect_role(contract, role):
+    settings = contract.models["models"][role]
     endpoint = os.environ.get(settings["endpoint_env"])
     if not endpoint:
         raise ValueError(f"Set {settings['endpoint_env']} to the deployed model's /v1 endpoint")
     client = VllmModel(settings, endpoint, os.environ.get(settings["token_env"]),
                        contract.models["response_contract"]["timeout_seconds"])
     client.verify_identity()
+    return client
+
+
+def run_smoke(contract, role, lock_path):
+    settings = contract.models["models"][role]
+    _, lock_hash = load_lock(contract, role, lock_path)
+    client = connect_role(contract, role)
     cases = [
         ("text", "Return the color written here: green.", (), ["green"]),
         ("single_red", "Return the dominant color of each attached image in attachment order.", ("red",), ["red"]),
@@ -104,13 +116,13 @@ def run_smoke(contract, role, lock_path):
                                        "minItems": len(expected), "maxItems": len(expected)}},
         }
         messages = (("user", prompt + "\nReturn one JSON object conforming to: " + json.dumps(schema)),)
-        probe_id = canonical_hash([role, name, messages, assets, _sha(lock_data)])
+        probe_id = canonical_hash([role, name, messages, assets, lock_hash])
         request = ModelRequest(role, "preflight", "m1_color_probe", {"images": assets}, canonical_hash(messages),
                                schema, canonical_hash(settings), probe_id, messages, images)
         result, reasoning_seen = client.complete(request)
         results[name] = {**asdict(result), "reasoning_separated": reasoning_seen,
                          "image_hashes": [item["sha256"] for item in assets], "request_id": probe_id,
                          "passed": result.schema_valid and result.parsed_payload == {"colors": expected}}
-    return {"role": role, "model_id": settings["model_id"], "model_lock_sha256": _sha(lock_data),
+    return {"role": role, "model_id": settings["model_id"], "model_lock_sha256": lock_hash,
             "checks": results, "passed": all(case["passed"] for case in results.values()) and
             (not settings["generation"]["thinking"] or any(case["reasoning_separated"] for case in results.values()))}
