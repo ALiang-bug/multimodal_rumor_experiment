@@ -106,7 +106,7 @@ human:
     second_round_new_examples: true
 
 qa:
-  prompt_version: "1.1.1"
+  prompt_version: "1.1.2"
   max_questions_per_sample_task: 1
   label_tiers_allowed: [silver, gold]
   single_choice_default_options: 4
@@ -149,7 +149,7 @@ quality_goals:
   per_task_fallback: full_human_review
 
 runtime:
-  workers_initial: 1
+  workers_initial: 4
   batch_source_samples_initial: 50
   request_timeout_seconds: 180
   technical_max_retries: 2

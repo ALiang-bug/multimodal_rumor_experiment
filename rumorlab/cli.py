@@ -66,14 +66,20 @@ def main():
     smoke.add_argument("--provenance", action="store_true", help="Also derive source labels from the manifest")
     annotate = commands.add_parser("annotate", help="Annotate a bounded MMFakeBench val batch")
     review_labels = commands.add_parser("review-labels", help="Review the saved annotations of a val batch")
-    for command in (annotate, review_labels):
+    generate_qa = commands.add_parser("generate-qa", help="Generate QA from accepted val annotations")
+    review_qa = commands.add_parser("review-qa", help="Review the saved QA candidates of a val batch")
+    for command in (annotate, review_labels, generate_qa, review_qa):
         command.add_argument("--run-id", required=True, help="Imported val snapshot")
         command.add_argument("--batch-id", required=True, help="Versioned pilot batch within the snapshot")
         command.add_argument("--reviewer-lock", required=True, type=Path)
         command.add_argument("--state-db", type=Path)
         command.add_argument("--workers", type=int, help="Maximum concurrent model requests")
-    annotate.add_argument("--limit", required=True, type=int)
-    annotate.add_argument("--annotator-lock", required=True, type=Path)
+    for command, unit in ((annotate, "samples"), (generate_qa, "accepted labels")):
+        command.add_argument("--limit", required=True, type=int, help=f"Maximum number of {unit}")
+        command.add_argument("--annotator-lock", required=True, type=Path)
+    generate_qa.add_argument("--label-batch-id", required=True, help="Completed source label batch")
+    for command in (generate_qa, review_qa):
+        command.add_argument("--dry-run", action="store_true", help="Report eligible work without requesting the model")
     invalidate = commands.add_parser("invalidate", help="Retire a version and invalidate its downstream jobs")
     invalidate.add_argument("--record-id", required=True)
     invalidate.add_argument("--content-hash", required=True)
@@ -98,13 +104,13 @@ def main():
         command.add_argument("--confirmed-links", type=Path)
         grouping_commands.append(command)
     for command in (preflight, validate, release, audit, evaluate, qa_eval, import_data, smoke, annotate,
-                    review_labels, invalidate, export, human, blind, *grouping_commands):
+                    review_labels, generate_qa, review_qa, invalidate, export, human, blind, *grouping_commands):
         command.add_argument("--config", default="configs/experiment.yaml", type=Path)
     args = parser.parse_args()
     try:
         contract = Contract(args.config)
-        if args.command in {"annotate", "review-labels"}:
-            from .pilot import annotate as run_annotation, review_labels as run_review
+        if args.command in {"annotate", "review-labels", "generate-qa", "review-qa"}:
+            from . import pilot
             from .state import State
 
             workers = args.workers if args.workers is not None else contract.experiment["runtime"]["workers_initial"]
@@ -112,12 +118,16 @@ def main():
                 raise ValueError("--workers must be a positive integer")
             state = State(args.state_db or contract.root / contract.experiment["paths"]["state_db"])
             try:
+                batch = (state, contract, args.run_id, args.batch_id)
                 if args.command == "annotate":
-                    report = run_annotation(state, contract, args.run_id, args.batch_id, args.limit,
-                                            args.annotator_lock, args.reviewer_lock, workers=workers)
+                    report = pilot.annotate(*batch, args.limit, args.annotator_lock, args.reviewer_lock, workers=workers)
+                elif args.command == "review-labels":
+                    report = pilot.review_labels(*batch, args.reviewer_lock, workers=workers)
+                elif args.command == "generate-qa":
+                    report = pilot.generate_qa(*batch, args.label_batch_id, args.limit, args.annotator_lock,
+                                               args.reviewer_lock, workers=workers, dry_run=args.dry_run)
                 else:
-                    report = run_review(state, contract, args.run_id, args.batch_id, args.reviewer_lock,
-                                        workers=workers)
+                    report = pilot.review_qa(*batch, args.reviewer_lock, workers=workers, dry_run=args.dry_run)
             finally:
                 state.close()
             print(json.dumps(report, ensure_ascii=False))

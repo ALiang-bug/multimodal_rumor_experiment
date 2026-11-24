@@ -12,7 +12,7 @@ from jsonschema import Draft202012Validator
 from .models import ModelResponse
 
 
-def _label_decoding_schema(schema, task_id):
+def _decoding_schema(schema, task_id):
     # Keep conditional cross-field rules in the prompt and strict local validation.
     result = {key: value for key, value in schema.items() if key not in {"allOf", "uniqueItems"}}
     if "pattern" in result and ("minLength" in result or "maxLength" in result):
@@ -21,12 +21,13 @@ def _label_decoding_schema(schema, task_id):
         properties = dict(schema["properties"])
         for rule in schema.get("allOf", ()):
             if rule.get("if", {}).get("properties", {}).get("task_id", {}).get("const") == task_id:
-                properties.update(rule["then"]["properties"])
-        result["properties"] = {key: _label_decoding_schema(value, task_id) for key, value in properties.items()}
+                properties.update({key: value for key, value in rule["then"]["properties"].items()
+                                   if "const" not in properties.get(key, {})})
+        result["properties"] = {key: _decoding_schema(value, task_id) for key, value in properties.items()}
     if "items" in schema:
-        result["items"] = _label_decoding_schema(schema["items"], task_id)
+        result["items"] = _decoding_schema(schema["items"], task_id)
     if "anyOf" in schema:
-        result["anyOf"] = [_label_decoding_schema(value, task_id) for value in schema["anyOf"]]
+        result["anyOf"] = [_decoding_schema(value, task_id) for value in schema["anyOf"]]
     return result
 
 
@@ -83,8 +84,8 @@ class VllmModel:
         generation.pop("thinking")
         generation["max_tokens"] = generation.pop("max_output_tokens")
         decoding_schema = request.response_schema
-        if request.stage in {"annotate", "review_labels"}:
-            decoding_schema = _label_decoding_schema(decoding_schema, request.task_id)
+        if request.stage in {"annotate", "review_labels", "generate_qa", "review_qa"}:
+            decoding_schema = _decoding_schema(decoding_schema, request.task_id)
         body = {
             **generation, "model": self.settings["model_id"], "messages": messages,
             "stream": False, "response_format": {"type": "json_schema", "json_schema": {

@@ -16,7 +16,9 @@ from rumorlab.grouping import freeze_plan
 from rumorlab.ingest import import_snapshot
 from rumorlab.m1 import load_lock
 from rumorlab.mmfakebench import prepare_mmfakebench
+from rumorlab.qa import solver_projection
 from rumorlab.records import record_envelope, stage_record
+from rumorlab.requests import build_request
 from rumorlab.snapshot import snapshot_records
 from rumorlab.state import State
 from rumorlab.validation import validate_rows
@@ -73,13 +75,15 @@ class PilotFixture:
             mock.start()
             self.addCleanup(mock.stop)
 
-    def command(self, stage, *, expected=0, workers=None):
-        args = ["rumorlab", stage, "--run-id", RUN, "--batch-id", BATCH, "--config", str(CONFIG),
+    def command(self, stage, *, expected=0, workers=None, batch=BATCH, extra=()):
+        args = ["rumorlab", stage, "--run-id", RUN, "--batch-id", batch, "--config", str(CONFIG),
                 "--state-db", str(self.db_path), "--reviewer-lock", str(self.locks["reviewer"])]
-        if stage == "annotate":
-            args += ["--annotator-lock", str(self.locks["annotator"]), "--limit", "1"]
+        if stage in {"annotate", "generate-qa"}:
+            args += ["--annotator-lock", str(self.locks["annotator"])]
+            args += ["--limit", "1"] if stage == "annotate" else ["--label-batch-id", BATCH]
         if workers is not None:
             args += ["--workers", str(workers)]
+        args.extend(extra)
         out, err = StringIO(), StringIO()
         with patch("sys.argv", args), redirect_stdout(out), redirect_stderr(err):
             self.assertEqual(main(), expected, err.getvalue() or out.getvalue())
@@ -137,7 +141,7 @@ class AnnotateTests(PilotFixture, TestCase):
             first = self.command("annotate", workers=2)
             rerun = self.command("annotate")
         self.assertEqual((first["samples"], first["workers"], first["failed"], len(self.calls)), (1, 2, 0, 4))
-        self.assertEqual(rerun["workers"], 1)
+        self.assertEqual(rerun["workers"], 4)
         self.assertEqual([row["task_id"] for row in first["results"] if row["task_id"] in TASK_LABELS], list(TASK_LABELS))
         self.assertTrue(all(row["cached"] for row in rerun["results"]))
         records = self.export()
@@ -175,7 +179,7 @@ class AnnotateTests(PilotFixture, TestCase):
         self.assertEqual(len([row for row in self.export() if row["record_type"] == "annotation"]), 5)
 
 
-class ReviewTests(PilotFixture, TestCase):
+class LabelFixture(PilotFixture):
     def seed_annotations(self, *tasks):
         digest, _ = freeze_plan(self.state, RUN, self.samples, self.contract.experiment["splitting"])
         models, hashes = {}, {}
@@ -194,7 +198,7 @@ class ReviewTests(PilotFixture, TestCase):
             "prompt_versions": {stage: self.contract.experiment["annotation"]["prompt_version"]
                                 for stage in ("annotate", "review_labels")},
             "runtime": {"source_run_id": RUN, "batch_id": BATCH, "sample_count": 1,
-                        "reviewer_lock_sha256": hashes["reviewer"]},
+                        **{f"{role}_lock_sha256": digest for role, digest in hashes.items()}},
         }
         manifest = {**record_envelope("run_manifest", data, digest, is_mock=False), **data}
         records = []
@@ -221,6 +225,8 @@ class ReviewTests(PilotFixture, TestCase):
             )
         return records
 
+
+class ReviewTests(LabelFixture, TestCase):
     def test_reviews_saved_candidate_and_projects_silver_without_rewriting_it(self):
         candidate, = self.seed_annotations()
 
@@ -269,3 +275,130 @@ class ReviewTests(PilotFixture, TestCase):
         reviews = [row for row in self.export() if row["record_type"] == "review"]
         self.assertEqual({(row["target_id"], row["target_content_hash"]) for row in reviews},
                          {(row["annotation_id"], row["content_hash"]) for row in candidates})
+
+
+QA_BATCH = "questions-1"
+PASS_REVIEW = {"decision": "PASS", "issue_codes": [], "rationale": "Review fixture.",
+               "evidence_ids": [], "suggested_annotation": None, "suggested_qa_revision": None}
+
+
+class QAFixture(LabelFixture):
+    def seed_reviewed_labels(self, *tasks, decision="PASS"):
+        annotations = self.seed_annotations(*tasks)
+        results = []
+        with self.state.db:
+            for index, annotation in enumerate(annotations, 100):
+                payload = PASS_REVIEW if decision == "PASS" else {
+                    **PASS_REVIEW, "decision": decision, "issue_codes": ["EVIDENCE_MISSING"],
+                }
+                producer = {**annotation["producer"], "role": "reviewer", "model_id": "google/gemma-4-31B-it"}
+                review = stage_record({"job_id": f"{index:064x}", "input_hash": f"{index:064x}", "payload": payload},
+                                      self.sample, producer, [], kind="review", target=annotation)
+                self.state.db.execute("INSERT INTO pilot_records VALUES (?, ?, ?)",
+                                      (producer["run_id"], review["review_id"], json.dumps(review)))
+                results.append({"record_id": review["review_id"], "decision": decision, "status": "COMPLETED"})
+            self.state.db.execute("UPDATE pilot_batches SET review_report = ? WHERE batch_id = ?",
+                                  (json.dumps({"failed": 0, "results": results}), BATCH))
+        return annotations
+
+    def qa_payload(self, task):
+        return {
+            "task_id": task, "question": "Which option fits the visible post?", "question_type": "single_choice",
+            "options": [{"option_id": "one", "text": "The first interpretation", "label_codes": [TASK_LABELS[task]]},
+                        {"option_id": "two", "text": "A different interpretation", "label_codes": []}],
+            "answer_option_ids": ["one"], "target_labels": [TASK_LABELS[task]],
+            "rationale": "Question fixture.", "evidence_ids": [], "required_inputs": ["text", "image"],
+            "qa_mode": "content",
+        }
+
+
+class GenerateQATests(QAFixture, TestCase):
+    def test_generates_resumable_candidates_with_four_workers_and_explicit_skip(self):
+        self.seed_reviewed_labels(*TASK_LABELS)
+        # The input label batch predates the QA implementation.
+        with self.state.db:
+            row = self.state.db.execute("SELECT manifest FROM pilot_batches").fetchone()
+            source = json.loads(row["manifest"])
+            source.update(code_revision="e" * 40, config_hash="3" * 64)
+            self.state.db.execute("UPDATE pilot_batches SET manifest = ?", (json.dumps(source),))
+        args = ("--limit", "4")
+        with patch("rumorlab.pilot.connect_role") as connect:
+            plan = self.command("generate-qa", batch=QA_BATCH, extra=(*args, "--dry-run"))
+            connect.assert_not_called()
+        self.assertEqual((plan["jobs"], plan["workers"]), (4, 4))
+        overlap = Barrier(4, timeout=5)
+
+        def reply(body):
+            overlap.wait()
+            schema = body["response_format"]["json_schema"]["schema"]
+            task = schema["anyOf"][0]["properties"]["task_id"]["const"]
+            payload = {"skip_reason": "no_supported_question"} if task == "intent_analysis" else self.qa_payload(task)
+            Draft202012Validator(schema).validate(payload)
+            return payload
+
+        with self.transport(reply):
+            generated = self.command("generate-qa", batch=QA_BATCH, extra=args)
+            resumed = self.command("generate-qa", batch=QA_BATCH, extra=args)
+        self.assertEqual((generated["failed"], len(self.calls)), (0, 4))
+        self.assertEqual([item["status"] for item in generated["results"]], ["VALIDATED"] * 3 + ["SKIPPED"])
+        self.assertTrue(all(item["cached"] for item in resumed["results"]))
+        questions = [item for item in self.export() if item["record_type"] == "qa"]
+        self.assertEqual(len(questions), 3)
+        self.assertTrue(all(not item["is_mock"] and "answer_option_ids" not in item["solver_input"] for item in questions))
+        source = next(item for item in self.export() if item["record_type"] == "review"
+                      and item["target_id"] == questions[0]["source_annotation_id"])
+        self.state.invalidate(source["review_id"], source["content_hash"])
+        question = next(item for item in self.export() if item.get("qa_id") == questions[0]["qa_id"])
+        self.assertEqual(question["status"], "STALE")
+
+    def test_human_pending_label_never_reaches_the_model(self):
+        self.seed_reviewed_labels(decision="NEEDS_HUMAN")
+        with patch("rumorlab.pilot.connect_role") as connect:
+            result = self.command("generate-qa", batch=QA_BATCH, extra=("--limit", "1"), expected=1)
+            connect.assert_not_called()
+        self.assertIn("No accepted model labels", result)
+
+
+class ReviewQATests(QAFixture, TestCase):
+    def test_reviews_saved_candidate_independently_and_binds_the_key(self):
+        self.seed_reviewed_labels()
+        annotation = next(item for item in self.export() if item["record_type"] == "annotation")
+        task = annotation["payload"]["task_id"]
+        row = self.state.db.execute("SELECT manifest FROM pilot_batches").fetchone()
+        manifest = json.loads(row["manifest"])
+        manifest.update(run_id="pilot_questions", prompt_versions={"review_qa": "1.1.2"})
+        manifest["runtime"]["batch_id"] = QA_BATCH
+        request = build_request(self.contract, "generate_qa", task, self.sample,
+                                annotation["payload"]["target_claim"], [], self.root, upstream=annotation)
+        payload = self.qa_payload(task)
+        question = stage_record({"job_id": "4" * 64, "input_hash": "5" * 64, "payload": payload},
+                                self.sample, {**annotation["producer"], "run_id": manifest["run_id"]}, [],
+                                kind="qa", target=annotation, solver=solver_projection(request, self.sample))
+        question["label_schema_version"] = self.contract.labels["label_schema_version"]
+        with self.state.db:
+            self.state.db.execute("INSERT INTO pilot_batches VALUES (?, ?, ?, ?, NULL, NULL)",
+                                  (RUN, QA_BATCH, manifest["run_id"], json.dumps(manifest)))
+            self.state.db.execute("INSERT INTO pilot_records VALUES (?, ?, ?)",
+                                  (manifest["run_id"], question["qa_id"], json.dumps(question)))
+            self.state.db.execute("INSERT INTO pilot_qa_reports VALUES (?, ?, ?)", (
+                manifest["run_id"], "generate_qa", json.dumps({"failed": 0, "results": [
+                    {"record_id": question["qa_id"], "status": "VALIDATED"},
+                ]}),
+            ))
+
+        def reply(body):
+            self.assertEqual(body["model"], "google/gemma-4-31B-it")
+            self.assertIn("Candidate and proposed key:", json.dumps(body["messages"]))
+            return PASS_REVIEW
+
+        with self.transport(reply):
+            report = self.command("review-qa", batch=QA_BATCH)
+            resumed = self.command("review-qa", batch=QA_BATCH)
+        self.assertEqual((report["failed"], report["workers"], len(self.calls)), (0, 4, 1))
+        self.assertTrue(resumed["results"][0]["cached"])
+        exported = self.export()
+        approved = next(item for item in exported if item["record_type"] == "qa")
+        review = next(item for item in exported if item.get("target_id") == approved["qa_id"])
+        self.assertEqual(approved["status"], "ACCEPTED_SILVER")
+        self.assertEqual(approved["payload"], payload)
+        self.assertEqual(review["target_content_hash"], question["content_hash"])

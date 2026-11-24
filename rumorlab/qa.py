@@ -6,6 +6,32 @@ import re
 from .validation import canonical_hash
 
 
+def solver_projection(request, sample):
+    material = request.visible_inputs
+    return {
+        "projection_version": "1.0.0", "text": material["text"],
+        "media_ids": list(dict.fromkeys(item["media_id"] for item in sample["media"])),
+        "reference_sample_ids": [], "evidence_ids": [item["evidence_id"] for item in material["evidence"]],
+        "input_hash": canonical_hash(material),
+    }
+
+
+def validate_candidate(payload, material, allowed_labels, *, seed, qa_id):
+    project_options(payload, seed=seed, qa_id=qa_id)
+    options = payload["options"]
+    if any(set(option.get("label_codes", ())) - allowed_labels for option in options):
+        raise ValueError("QA option has a label outside the current task")
+    correct = [option for option in options if option["option_id"] in payload["answer_option_ids"]]
+    if all("label_codes" in option for option in correct):
+        mapped = {code for option in correct for code in option["label_codes"]}
+        if mapped != set(payload["target_labels"]):
+            raise ValueError("Correct QA options do not cover the target labels")
+    available = {name for name, key in (("text", "text"), ("image", "images"), ("evidence", "evidence"))
+                 if material[key]}
+    if set(payload["required_inputs"]) - available or payload["qa_mode"] == "paired_comparison":
+        raise ValueError("QA requires material the solver cannot access")
+
+
 def project_options(payload, *, seed, qa_id):
     question = payload.get("question", "")
     if re.search(r"(?:正确答案|标准答案|参考答案|correct answer|answer key)\s*[:：=]", question, re.IGNORECASE):

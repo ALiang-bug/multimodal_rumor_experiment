@@ -29,6 +29,9 @@ def snapshot_records(state, run_id, *, gold_votes=3):
         for batch in batches:
             manifest = json.loads(batch["manifest"])
             reports = [json.loads(batch[key]) for key in ("annotate_report", "review_report") if batch[key]]
+            reports.extend(json.loads(row["report"]) for row in state.db.execute(
+                "SELECT report FROM pilot_qa_reports WHERE manifest_id = ?", (batch["manifest_id"],),
+            ))
             if any(report["failed"] for report in reports):
                 manifest["status"] = "FAILED"
             elif len(reports) == 2:

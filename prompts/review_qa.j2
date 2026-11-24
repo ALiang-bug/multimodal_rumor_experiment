@@ -6,4 +6,5 @@ Candidate and proposed key: {{ candidate_qa_json }}
 
 Determine which options the solver can support using the visible material, then compare them with the key. Check uniqueness for single choice, completeness for multiple choice, plausible distractors, neutral wording, answer leakage and availability of required images or evidence. Hidden history cannot support a solver answer. An uncertainty question must be answerable as such. Route unresolved annotation disputes for review.
 Use PASS for a sound question, NEEDS_HUMAN for missing information, disagreement or a repairable issue, and REJECT for an unusable question. Give a brief checkable reason and existing evidence IDs.
+In evidence_ids use only IDs listed under evidence in the solver-visible material. Return [] if that list is empty. Describe image details in rationale. Leave suggested_annotation null and flag label disputes for human review.
 Response schema: {{ response_schema_json }}

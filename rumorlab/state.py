@@ -40,6 +40,10 @@ class State:
                 record_id TEXT PRIMARY KEY, record TEXT NOT NULL
             );
             CREATE INDEX IF NOT EXISTS pilot_records_by_manifest ON pilot_records(manifest_id);
+            CREATE TABLE IF NOT EXISTS pilot_qa_reports (
+                manifest_id TEXT NOT NULL REFERENCES pilot_batches(manifest_id),
+                stage TEXT NOT NULL, report TEXT NOT NULL, PRIMARY KEY (manifest_id, stage)
+            );
             CREATE TABLE IF NOT EXISTS human_submissions (
                 run_id TEXT NOT NULL, record_id TEXT NOT NULL, record TEXT NOT NULL,
                 PRIMARY KEY (run_id, record_id)

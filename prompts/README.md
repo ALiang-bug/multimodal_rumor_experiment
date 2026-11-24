@@ -1,6 +1,6 @@
 # Prompt 合同
 
-标签标注与审核 Prompt 版本 1.1.2，QA Prompt 版本 1.1.1。系统消息根据当前阶段注入 Annotator 或 Reviewer 的角色和职责。用户消息末尾包含按阶段和任务渲染的完整响应 Schema。模型指令、任务卡及模型撰写的解释和 QA 使用英文，原始陈述、引文和字符位置按来源保留。模板使用 StrictUndefined；变量缺失即报错。每条请求新建会话。
+标签标注与审核、QA 生成与审核的 Prompt 版本均为 1.1.2。系统消息根据当前阶段注入 Annotator 或 Reviewer 的角色和职责。用户消息末尾包含按阶段和任务渲染的完整响应 Schema。模型指令、任务卡及模型撰写的解释和 QA 使用英文，原始陈述、引文和字符位置按来源保留。模板使用 StrictUndefined；变量缺失即报错。每条请求新建会话。
 
 ## 组成与响应
 
@@ -11,7 +11,7 @@
 | annotate | annotate.j2 加单一任务卡 | annotation_payload |
 | verify_manipulation | verify_manipulation.j2 加 text_reasoning 或 image_perception 卡 | review_payload |
 | review_labels | review_labels.j2 加单一任务卡 | review_payload |
-| generate_qa | generate_qa.j2 加单一任务卡 | qa_payload |
+| generate_qa | generate_qa.j2 加单一任务卡 | qa_payload 或带 skip_reason 的跳过响应 |
 | review_qa | review_qa.j2 加单一任务卡 | review_payload |
 
 text_reasoning 和 image_perception 的 OT/FT、OI/FI 由 manifest 产生 annotation 记录，不调用模型猜制作类型；它们的模型 Prompt 仅用于准备阶段的目标达成核验及可观察比较题。任何核验未通过都不能发布为成功受控篡改。

@@ -86,7 +86,7 @@ export GEMMA_SNAPSHOT="$MODELS_DIR/models--google--gemma-4-31B-it/snapshots/${GE
 ```bash
 vllm serve "$QWEN_SNAPSHOT" --served-model-name Qwen/Qwen3.8-27B \
   --host 127.0.0.1 --port 8000 --tensor-parallel-size 1 --dtype bfloat16 \
-  --max-model-len 12288 --max-num-seqs 1 --gpu-memory-utilization 0.92 \
+  --max-model-len 12288 --max-num-seqs 4 --gpu-memory-utilization 0.92 \
   --limit-mm-per-prompt '{"image":2}' --reasoning-parser qwen3 \
   2>&1 | tee runs/m1-qwen/server.log
 ```
@@ -106,7 +106,7 @@ python -m rumorlab preflight --mode real --role annotator \
 ```bash
 vllm serve "$GEMMA_SNAPSHOT" --served-model-name google/gemma-4-31B-it \
   --host 127.0.0.1 --port 8000 --tensor-parallel-size 1 --dtype bfloat16 \
-  --max-model-len 12288 --max-num-seqs 1 --gpu-memory-utilization 0.92 \
+  --max-model-len 12288 --max-num-seqs 4 --gpu-memory-utilization 0.92 \
   --limit-mm-per-prompt '{"image":2}' --reasoning-parser gemma4 \
   2>&1 | tee runs/m1-gemma/server.log
 ```
@@ -149,8 +149,36 @@ REVIEWER_BASE_URL=http://127.0.0.1:8000/v1 \
 
 Reviewer 只读取同一批次持久化且通过验证的模型候选。PASS 对原候选投影 silver，NEEDS_HUMAN 和 REJECT 分别投影待人工和排除。更改代码、锁或输入后使用新的 `--batch-id`。两阶段均只接受 MMFakeBench val。vLLM 解码使用结构和任务枚举约束，完整的条件式 Schema 保留在 Prompt 和本地校验中。
 
-两个阶段均可加 `--workers 2` 并发发送独立模型请求。对应角色的 vLLM 服务启动参数也要从 `--max-num-seqs 1` 改成 `--max-num-seqs 2`。单卡上仍按角色切换服务。先完成正在运行的旧提交批次，再更新代码并使用新的 `--batch-id` 做并发试跑。
-
-比较吞吐时，在同一提交上用相同 `--run-id`、`--limit` 和模型锁，分别用两个新批次执行 `--workers 1` 和 `--workers 2`。报告中的 `workers` 为本次并发上限，`elapsed_seconds` 为本阶段墙钟耗时。比较前确认两份报告的任务数、失败数和缓存命中情况。恢复同一批次时可降低 `--workers`，已成功任务会复用。
+标注、标签审核、QA 生成和 QA 审核的模型请求默认并发 4 条。对应角色的 vLLM 服务使用 `--max-num-seqs 4`。单卡继续依次加载两个角色。报告中的 `workers` 为本次并发上限，`elapsed_seconds` 为阶段耗时。同一批次重跑可以通过 `--workers` 调整并发，已完成任务复用缓存。
 
 用 `python -m rumorlab export-snapshot --run-id mmfakebench-val-import-smoke-12` 导出源样本及该导入批次的当前标注与审核记录。
+
+## M2 QA 生成与审核
+
+已有真实审核通过的 `m2-pilot-citations-02` 可直接作为输入。QA 使用独立批次，记录源标注批次、标签与审核的哈希以及当前 QA 代码版本。以下命令从最多 8 个已接受的标签各生成至多一道题。两条来源轴在没有可比较的参考版本时不出题。若可见材料不足，Qwen 可返回 `SKIPPED` 和原因。
+
+更新仓库，在项目根目录激活 `rumorlab-m1` 环境。Qwen 启动并就绪后执行：
+
+```bash
+set -o pipefail
+mkdir -p runs/m2-qa-01
+NO_PROXY=127.0.0.1,localhost no_proxy=127.0.0.1,localhost \
+ANNOTATOR_BASE_URL=http://127.0.0.1:8000/v1 \
+  python -m rumorlab generate-qa --run-id mmfakebench-val-import-smoke-12 \
+    --label-batch-id m2-pilot-citations-02 --batch-id m2-qa-01 --limit 8 \
+    --annotator-lock runs/m1-qwen/model_lock.json --reviewer-lock runs/m1-gemma/model_lock.json \
+  | tee runs/m2-qa-01/generate.json
+```
+
+同一 QA 批次在同一提交上单独审核。Qwen 停止、Gemma 启动并就绪后执行：
+
+```bash
+set -o pipefail
+NO_PROXY=127.0.0.1,localhost no_proxy=127.0.0.1,localhost \
+REVIEWER_BASE_URL=http://127.0.0.1:8000/v1 \
+  python -m rumorlab review-qa --run-id mmfakebench-val-import-smoke-12 \
+    --batch-id m2-qa-01 --reviewer-lock runs/m1-gemma/model_lock.json \
+  | tee runs/m2-qa-01/review.json
+```
+
+两个 QA 命令均可加 `--dry-run` 查看候选数量。`PASS` 题目在快照中投影为 silver，`NEEDS_HUMAN` 题目进入已有盲审入口。对通过题目做人审抽查时，使用 `export-human --target-id` 指定 QA ID，答题输入不含答案键。上游标签或其采纳审核失效时，依赖它的题目和审核随之失效。

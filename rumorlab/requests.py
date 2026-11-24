@@ -94,18 +94,21 @@ def build_request(contract, stage, task_id, sample, claim, evidence, media_root,
     solver = stage in {"generate_qa", "review_qa"}
     material, images = visible_material(sample, evidence, media_root, solver=solver)
     schema = _response_schema(contract, definition, task_id)
-    if stage in {"annotate", "review_labels"}:
+    if stage in {"annotate", "review_labels", "generate_qa", "review_qa"}:
         evidence_ids = [item["evidence_id"] for item in material["evidence"]]
-        citation_schema = (
+        schema["properties"]["evidence_ids"] = (
             {"type": "array", "items": {"enum": evidence_ids}, "uniqueItems": True}
             if evidence_ids else {"const": []}
         )
+    if stage == "annotate":
+        schema["properties"]["target_claim"] = {"const": claim}
+    elif stage == "review_labels":
         properties = schema["properties"]
-        properties["evidence_ids"] = citation_schema
-        if stage == "review_labels":
-            properties = properties["suggested_annotation"]["anyOf"][0]["properties"]
-            properties["evidence_ids"] = citation_schema
-        properties["target_claim"] = {"const": claim}
+        suggested = properties["suggested_annotation"]["anyOf"][0]["properties"]
+        suggested["evidence_ids"] = properties["evidence_ids"]
+        suggested["target_claim"] = {"const": claim}
+    elif stage == "review_qa":
+        schema["properties"]["suggested_annotation"] = {"type": "null"}
     environment = Environment(
         loader=FileSystemLoader(contract.root / "prompts"),
         undefined=StrictUndefined, autoescape=False,
@@ -135,6 +138,11 @@ def build_request(contract, stage, task_id, sample, claim, evidence, media_root,
         elif stage == "generate_qa":
             if upstream["status"] not in {"ACCEPTED_SILVER", "ACCEPTED_GOLD"}:
                 raise ValueError("QA generation requires an accepted annotation")
+            schema["properties"]["target_labels"] = {"const": payload["labels"]}
+            schema = {"anyOf": [schema, {"type": "object", "properties": {
+                "skip_reason": {"enum": ["insufficient_solver_evidence", "no_supported_question"]},
+            }, "required": ["skip_reason"], "additionalProperties": False}]}
+            values["response_schema_json"] = schema
             values.update(accepted_annotation_json=payload, qa_policy_json=contract.experiment["qa"])
         else:
             values.update(candidate_qa_json=payload, solver_input_json={

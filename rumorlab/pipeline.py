@@ -8,7 +8,7 @@ from pathlib import Path
 from .models import MockModel
 from .grouping import apply_plan, freeze_plan
 from .provenance import run_source_tasks
-from .qa import project_options
+from .qa import solver_projection, validate_candidate
 from .requests import build_request
 from .records import mock_manifest, stage_record
 from .validation import canonical_hash
@@ -42,6 +42,8 @@ def execute(state, contract, request, subject, dependencies, client, *, script_h
             retry_limit = settings["format_repair_max_attempts"]
             if request.stage in {"generate_qa", "review_qa"}:
                 retry_limit = min(retry_limit, settings["qa_format_revision_max_attempts"])
+        elif request.stage == "generate_qa" and "skip_reason" in response.parsed_payload:
+            payload = response.parsed_payload
         else:
             payload = response.parsed_payload
             visible = {item["evidence_id"] for item in request.visible_inputs["evidence"]}
@@ -56,11 +58,12 @@ def execute(state, contract, request, subject, dependencies, client, *, script_h
                 invalid |= annotation["applicability"] == "not_applicable" and request.task_id != "reality_plausibility"
             if request.stage == "generate_qa":
                 try:
-                    project_options(payload, seed=contract.experiment["seed"], qa_id=request.request_id)
+                    allowed = {item["code"] for item in contract.labels["tasks"][request.task_id]["labels"]}
+                    validate_candidate(payload, request.visible_inputs, allowed,
+                                       seed=contract.experiment["seed"], qa_id=request.request_id)
                 except ValueError:
                     invalid = True
                 invalid |= set(payload["target_labels"]) != set(labels)
-                invalid |= bool({"reference_text", "reference_image"} & set(payload["required_inputs"]))
             if invalid:
                 category = "semantic"
                 retry_limit = 0
@@ -178,6 +181,9 @@ def mock_run(state, contract, run_id, *, cases=None, provenance=False):
             evidence_ids = [item["evidence_id"] for item in request.visible_inputs["evidence"]]
             report.append({"stage": stage, "job_id": result["job_id"], "cached": cached,
                            "sample_id": sample_id, "claim_id": claim_id, "task_id": task})
+            if stage == "generate_qa" and "skip_reason" in result["payload"]:
+                report[-1].update(status="SKIPPED", reason=result["payload"]["skip_reason"])
+                break
             if stage in {"annotate", "generate_qa"}:
                 candidate = {**result, "sample_id": sample["sample_id"], "status": "GENERATED"}
                 upstream = candidate
@@ -186,14 +192,9 @@ def mock_run(state, contract, run_id, *, cases=None, provenance=False):
                     candidate_record = stage_record(result, sample, producer, evidence_ids, kind="annotation")
                     annotation_record = candidate_record
                 else:
-                    solver = {
-                        "projection_version": "1.0.0", "text": request.visible_inputs["text"],
-                        "media_ids": list(dict.fromkeys(item["media_id"] for item in sample["media"])),
-                        "reference_sample_ids": [], "evidence_ids": evidence_ids,
-                        "input_hash": canonical_hash(request.visible_inputs),
-                    }
                     candidate_record = stage_record(
-                        result, sample, producer, evidence_ids, kind="qa", target=annotation_record, solver=solver,
+                        result, sample, producer, evidence_ids, kind="qa", target=annotation_record,
+                        solver=solver_projection(request, sample),
                     )
                 candidate_record["label_schema_version"] = contract.labels["label_schema_version"]
                 output.append(candidate_record)
