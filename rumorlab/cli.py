@@ -65,6 +65,7 @@ def main():
     smoke.add_argument("--script", type=Path, help="JSONL of sample, claim, task and scripted responses")
     smoke.add_argument("--provenance", action="store_true", help="Also derive source labels from the manifest")
     annotate = commands.add_parser("annotate", help="Annotate a bounded MMFakeBench val batch")
+    annotate.add_argument("--offset", type=int, default=0, help="Number of samples to skip in the fixed val ordering")
     review_labels = commands.add_parser("review-labels", help="Review the saved annotations of a val batch")
     generate_qa = commands.add_parser("generate-qa", help="Generate QA from accepted val annotations")
     review_qa = commands.add_parser("review-qa", help="Review the saved QA candidates of a val batch")
@@ -138,7 +139,8 @@ def main():
             try:
                 batch = (state, contract, args.run_id, args.batch_id)
                 if args.command == "annotate":
-                    report = pilot.annotate(*batch, args.limit, args.annotator_lock, args.reviewer_lock, workers=workers)
+                    report = pilot.annotate(*batch, args.limit, args.annotator_lock, args.reviewer_lock,
+                                            offset=args.offset, workers=workers)
                 elif args.command == "review-labels":
                     report = pilot.review_labels(*batch, args.reviewer_lock, workers=workers)
                 elif args.command == "generate-qa":

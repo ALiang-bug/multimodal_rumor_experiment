@@ -149,7 +149,7 @@ quality_goals:
   per_task_fallback: full_human_review
 
 runtime:
-  workers_initial: 4
+  workers_initial: 48
   batch_source_samples_initial: 50
   request_timeout_seconds: 180
   technical_max_retries: 2

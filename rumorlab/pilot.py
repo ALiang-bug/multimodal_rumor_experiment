@@ -173,18 +173,21 @@ def _finish(state, manifest, stage, results, workers, started):
     return report
 
 
-def annotate(state, contract, run_id, batch_id, limit, annotator_lock, reviewer_lock, *, workers=1):
+def annotate(state, contract, run_id, batch_id, limit, annotator_lock, reviewer_lock, *, offset=0, workers=1):
     started = monotonic()
     existing = _batch(state, run_id, batch_id)
     row, source, records, samples, evidence = _inputs(state.db, run_id)
     if not 1 <= limit <= len(samples):
         raise ValueError(f"--limit must be between 1 and {len(samples)}")
+    if not 0 <= offset <= len(samples) - limit:
+        raise ValueError(f"--offset must be between 0 and {len(samples) - limit} for --limit {limit}")
     sample_ids = list(dict.fromkeys(item["sample_id"] for item in source["selection"]))
     if set(sample_ids) != set(samples):
         raise ValueError("Import manifest and sample IDs disagree")
     if limit < len(samples):
         sample_ids.sort(key=lambda sid: canonical_hash([contract.experiment["seed"], sid]))
-    selected = [samples[sid] for sid in sample_ids[:limit]]
+    selected_ids = sample_ids[offset:offset + limit]
+    selected = [samples[sid] for sid in selected_ids]
     tasks = contract.experiment["annotation"]["model_tasks"]
     work_count = sum(len(sample["target_claims"]) for sample in selected) * len(tasks)
     for role in ("annotator", "reviewer"):
@@ -199,7 +202,7 @@ def annotate(state, contract, run_id, batch_id, limit, annotator_lock, reviewer_
     if any(sample["split"] != "dev" for sample in selected):
         raise ValueError("Pilot selection must remain entirely in dev")
     split_id = "split_" + plan_digest
-    input_hash = canonical_hash([run_id, batch_id, row["digest"], sample_ids[:limit], plan_digest,
+    input_hash = canonical_hash([run_id, batch_id, row["digest"], selected_ids, plan_digest,
                                  revision, contract.config_hash, [digest for _, digest in locks.values()]])
     manifest_id = "pilot_" + input_hash
     if existing and existing["manifest_id"] != manifest_id:

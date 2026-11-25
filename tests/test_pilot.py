@@ -141,7 +141,7 @@ class AnnotateTests(PilotFixture, TestCase):
             first = self.command("annotate", workers=2)
             rerun = self.command("annotate")
         self.assertEqual((first["samples"], first["workers"], first["failed"], len(self.calls)), (1, 2, 0, 4))
-        self.assertEqual(rerun["workers"], 4)
+        self.assertEqual(rerun["workers"], 48)
         self.assertEqual([row["task_id"] for row in first["results"] if row["task_id"] in TASK_LABELS], list(TASK_LABELS))
         self.assertTrue(all(row["cached"] for row in rerun["results"]))
         records = self.export()
@@ -150,6 +150,26 @@ class AnnotateTests(PilotFixture, TestCase):
         self.assertEqual({record["producer"]["kind"] for record in labels}, {"model", "manifest"})
         self.assertEqual({record["payload"]["labels"][0] for record in labels}, {*TASK_LABELS.values(), "OT", "OI"})
         self.assertTrue(all(not record["is_mock"] and record["quality_tier"] == "unresolved" for record in labels))
+
+    def test_val_offsets_select_disjoint_samples_and_freeze_the_batch(self):
+        def reply(body):
+            task = body["response_format"]["json_schema"]["schema"]["properties"]["task_id"]["const"]
+            sample = next(sample for sample in self.samples if sample["text"] in json.dumps(body["messages"]))
+            return self.payload(task, sample)
+
+        with self.transport(reply):
+            first = self.command("annotate")
+            second = self.command("annotate", batch="pilot-2", extra=("--offset", "1"))
+            resumed = self.command("annotate", batch="pilot-2", extra=("--offset", "1"))
+            changed = self.command("annotate", batch="pilot-2", expected=1)
+            invalid = self.command("annotate", extra=("--offset", "2"), expected=1)
+
+        self.assertEqual({row["sample_id"] for row in first["results"] + second["results"]},
+                         {sample["sample_id"] for sample in self.samples})
+        self.assertEqual(second["manifest_id"], resumed["manifest_id"])
+        self.assertEqual(len(self.calls), 8)
+        self.assertIn("Batch inputs changed", changed)
+        self.assertIn("--offset must be between 0 and 1", invalid)
 
     def test_rejects_test_snapshot_before_connecting(self):
         row = self.state.db.execute("SELECT manifest FROM import_manifests").fetchone()
@@ -313,7 +333,7 @@ class QAFixture(LabelFixture):
 
 
 class GenerateQATests(QAFixture, TestCase):
-    def test_generates_resumable_candidates_with_four_workers_and_explicit_skip(self):
+    def test_generates_resumable_candidates_concurrently_with_explicit_skip(self):
         self.seed_reviewed_labels(*TASK_LABELS)
         # The input label batch predates the QA implementation.
         with self.state.db:
@@ -325,7 +345,7 @@ class GenerateQATests(QAFixture, TestCase):
         with patch("rumorlab.pilot.connect_role") as connect:
             plan = self.command("generate-qa", batch=QA_BATCH, extra=(*args, "--dry-run"))
             connect.assert_not_called()
-        self.assertEqual((plan["jobs"], plan["workers"]), (4, 4))
+        self.assertEqual((plan["jobs"], plan["workers"]), (4, 48))
         overlap = Barrier(4, timeout=5)
 
         def reply(body):
@@ -394,7 +414,7 @@ class ReviewQATests(QAFixture, TestCase):
         with self.transport(reply):
             report = self.command("review-qa", batch=QA_BATCH)
             resumed = self.command("review-qa", batch=QA_BATCH)
-        self.assertEqual((report["failed"], report["workers"], len(self.calls)), (0, 4, 1))
+        self.assertEqual((report["failed"], report["workers"], len(self.calls)), (0, 48, 1))
         self.assertTrue(resumed["results"][0]["cached"])
         exported = self.export()
         approved = next(item for item in exported if item["record_type"] == "qa")
