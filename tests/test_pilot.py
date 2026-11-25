@@ -16,6 +16,7 @@ from rumorlab.grouping import freeze_plan
 from rumorlab.ingest import import_snapshot
 from rumorlab.m1 import load_lock
 from rumorlab.mmfakebench import prepare_mmfakebench
+from rumorlab.prompts_v1_2 import task_guide
 from rumorlab.provenance import prepare_source_tasks, save_source_tasks
 from rumorlab.qa import solver_projection
 from rumorlab.records import record_envelope, stage_record
@@ -28,6 +29,7 @@ from rumorlab.vllm import VllmModel
 
 ROOT = Path(__file__).resolve().parents[1]
 CONFIG = ROOT / "configs/experiment.yaml"
+SINGLE_LABEL_CONFIG = ROOT / "configs/experiment-single-label.yaml"
 REVISION = "f" * 40
 RUN = "val-data"
 BATCH = "pilot-1"
@@ -38,6 +40,8 @@ TASK_LABELS = {
 
 
 class PilotFixture:
+    config_path = CONFIG
+
     def setUp(self):
         temporary = TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
@@ -45,7 +49,7 @@ class PilotFixture:
         self.db_path = self.root / "state.sqlite"
         self.state = State(self.db_path)
         self.addCleanup(self.state.close)
-        self.contract = Contract(CONFIG)
+        self.contract = Contract(self.config_path)
         self.locks = {}
         for role, settings in self.contract.models["models"].items():
             lock = {
@@ -78,7 +82,7 @@ class PilotFixture:
             self.addCleanup(mock.stop)
 
     def command(self, stage, *, expected=0, workers=None, batch=BATCH, extra=()):
-        args = ["rumorlab", stage, "--run-id", RUN, "--batch-id", batch, "--config", str(CONFIG),
+        args = ["rumorlab", stage, "--run-id", RUN, "--batch-id", batch, "--config", str(self.config_path),
                 "--state-db", str(self.db_path), "--reviewer-lock", str(self.locks["reviewer"])]
         if stage in {"annotate", "generate-qa"}:
             args += ["--annotator-lock", str(self.locks["annotator"])]
@@ -321,6 +325,40 @@ class AnnotateTests(PilotFixture, TestCase):
         self.assertEqual(len([row for row in self.export() if row["record_type"] == "annotation"]), 5)
 
 
+class SingleLabelAnnotateTests(PilotFixture, TestCase):
+    config_path = SINGLE_LABEL_CONFIG
+
+    def test_v2_single_labels_are_decoded_and_validated(self):
+        invalid = {
+            "image_text_consistency": {"labels": ["UNKNOWN"], "unknown_reason": "Unclear."},
+            "persuasion_strategy": {"labels": ["SOCIAL_PROOF", "AUTHORITY"]},
+            "intent_analysis": {"applicability": "not_applicable", "labels": []},
+        }
+
+        def reply(body):
+            schema = body["response_format"]["json_schema"]["schema"]
+            task = schema["properties"]["task_id"]["const"]
+            labels = schema["properties"]["labels"]
+            self.assertEqual((labels["minItems"], labels["maxItems"]), (1, 1))
+            self.assertNotIn("UNKNOWN", labels["items"]["enum"])
+            self.assertIn("Quote only legible image text", json.dumps(body["messages"]))
+            sample = next(sample for sample in self.samples if sample["text"] in json.dumps(body["messages"]))
+            payload = self.payload(task, sample)
+            payload.update(invalid.get(task, {"labels": ["PLAUSIBLE"]}))
+            return payload
+
+        with self.transport(reply):
+            report = self.command("annotate", expected=1)
+        failures = {item["task_id"]: item["category"] for item in report["results"] if item["status"] == "FAILED"}
+        self.assertEqual(failures, {task: "format" for task in invalid})
+        record, = [row for row in self.export()
+                   if row["record_type"] == "annotation" and row["producer"]["kind"] == "model"]
+        self.assertEqual(record["payload"]["labels"], ["PLAUSIBLE"])
+        self.assertEqual(record["status"], "VALIDATED")
+        self.assertEqual(record["label_schema_version"], "2.0.0")
+        self.assertEqual(record["producer"]["prompt_version"], "1.2.0")
+
+
 class LabelFixture(PilotFixture):
     def seed_annotations(self, *tasks, batch=BATCH, start=1):
         digest, _ = freeze_plan(self.state, RUN, self.samples, self.contract.experiment["splitting"])
@@ -366,6 +404,42 @@ class LabelFixture(PilotFixture):
                 [(manifest["run_id"], row["annotation_id"], json.dumps(row)) for row in records],
             )
         return records
+
+
+class SingleLabelReviewTests(LabelFixture, TestCase):
+    config_path = SINGLE_LABEL_CONFIG
+
+    def payload(self, task, sample=None):
+        payload = super().payload(task, sample)
+        if task == "reality_plausibility":
+            payload["labels"] = ["PLAUSIBLE"]
+        return payload
+
+    def test_v2_reviewer_uses_shared_guide_and_rejects_legacy_suggestions(self):
+        plausible, persuasion = self.seed_annotations("reality_plausibility", "persuasion_strategy")
+
+        def reply(body):
+            schema = body["response_format"]["json_schema"]["schema"]
+            suggested = schema["properties"]["suggested_annotation"]["anyOf"][0]
+            task = suggested["properties"]["task_id"]["const"]
+            labels = suggested["properties"]["labels"]
+            self.assertEqual((labels["minItems"], labels["maxItems"]), (1, 1))
+            self.assertNotIn("UNKNOWN", labels["items"]["enum"])
+            user = body["messages"][-1]["content"][-1]["text"]
+            self.assertIn(task_guide(task), user)
+            if task == "reality_plausibility":
+                self.assertIn('"labels": ["PLAUSIBLE"]', user)
+                return PASS_REVIEW
+            return {**PASS_REVIEW, "decision": "NEEDS_HUMAN", "issue_codes": ["INSUFFICIENT_EVIDENCE"],
+                    "suggested_annotation": {**persuasion["payload"], "labels": ["SOCIAL_PROOF", "AUTHORITY"]}}
+
+        with self.transport(reply):
+            report = self.command("review-labels", expected=1)
+        self.assertEqual([(item["task_id"], item["status"]) for item in report["results"]],
+                         [("reality_plausibility", "COMPLETED"), ("persuasion_strategy", "FAILED")])
+        saved = {row["annotation_id"]: row for row in self.export() if row["record_type"] == "annotation"}
+        self.assertEqual(saved[plausible["annotation_id"]]["status"], "ACCEPTED_SILVER")
+        self.assertEqual(saved[persuasion["annotation_id"]]["status"], "VALIDATED")
 
 
 class ReviewTests(LabelFixture, TestCase):

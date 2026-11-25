@@ -1,5 +1,7 @@
 # Prompt 合同
 
+`--config configs/experiment-single-label.yaml` 启用英文 Prompt 1.2.0 和标签规范 2.0.0。四个模型维度使用 `rumorlab/prompts_v1_2.py` 的共享证据规范与任务卡，均为单选。现实语境加入 `PLAUSIBLE`，四个模型维度移除 `UNKNOWN`。下文的 1.1.2 基线由 `configs/experiment.yaml` 加载。
+
 标签标注与审核、QA 生成与审核的 Prompt 版本均为 1.1.2。系统消息根据当前阶段注入 Annotator 或 Reviewer 的角色和职责。用户消息末尾包含按阶段和任务渲染的完整响应 Schema。模型指令、任务卡及模型撰写的解释和 QA 使用英文，原始陈述、引文和字符位置按来源保留。模板使用 StrictUndefined；变量缺失即报错。每条请求新建会话。
 
 ## 组成与响应

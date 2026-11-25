@@ -259,14 +259,20 @@ def annotate(state, contract, run_id, batch_id, limit, annotator_lock, reviewer_
                             reviewer_lock, workers=workers)[0]
 
 
-def annotate_batches(state, contract, run_id, batches, annotator_lock, reviewer_lock, *, workers):
-    started = monotonic()
-    row, source, records, samples, evidence = _inputs(state.db, run_id)
+def _ordered_sample_ids(source, samples, seed, *, subset):
     sample_ids = list(dict.fromkeys(item["sample_id"] for item in source["selection"]))
     if set(sample_ids) != set(samples):
         raise ValueError("Import manifest and sample IDs disagree")
-    if len(batches) != 1 or batches[0][2] < len(samples):
-        sample_ids.sort(key=lambda sid: canonical_hash([contract.experiment["seed"], sid]))
+    if subset:
+        sample_ids.sort(key=lambda sid: canonical_hash([seed, sid]))
+    return sample_ids
+
+
+def annotate_batches(state, contract, run_id, batches, annotator_lock, reviewer_lock, *, workers):
+    started = monotonic()
+    row, source, records, samples, evidence = _inputs(state.db, run_id)
+    sample_ids = _ordered_sample_ids(source, samples, contract.experiment["seed"],
+                                     subset=len(batches) != 1 or batches[0][2] < len(samples))
     tasks = contract.experiment["annotation"]["model_tasks"]
     locks = {"annotator": load_lock(contract, "annotator", annotator_lock),
              "reviewer": load_lock(contract, "reviewer", reviewer_lock)}

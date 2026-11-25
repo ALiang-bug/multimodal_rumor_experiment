@@ -6,6 +6,7 @@ import json
 
 from jinja2 import Environment, FileSystemLoader, StrictUndefined
 
+from . import prompts_v1_2
 from .validation import canonical_hash
 
 
@@ -115,9 +116,12 @@ def build_request(contract, stage, task_id, sample, claim, evidence, media_root,
         undefined=StrictUndefined, autoescape=False,
     )
     task = contract.labels["tasks"][task_id]
+    versioned_guide = contract.single_label and task_id in prompts_v1_2.TASKS
     values = {
         "task_id": task_id,
-        "task_instructions": environment.loader.get_source(environment, f"tasks/{task_id}.txt")[0],
+        "task_instructions": (prompts_v1_2.task_guide(task_id) if versioned_guide else
+                              environment.loader.get_source(environment, f"tasks/{task_id}.txt")[0]),
+        "single_label": contract.single_label,
         "task_definition_json": {
             "cardinality": task["cardinality"], "origin": task["origin"],
             "labels": {item["code"]: item["name_en"] for item in task["labels"]},
@@ -153,7 +157,7 @@ def build_request(contract, stage, task_id, sample, claim, evidence, media_root,
             })
     rendered = {key: json.dumps(value, ensure_ascii=False, sort_keys=True)
                 if key.endswith("_json") else value for key, value in values.items()}
-    messages = (
+    messages = prompts_v1_2.label_messages(stage, rendered) if versioned_guide and stage in prompts_v1_2.ROLES else (
         ("system", environment.get_template("system.txt").render(role=role)),
         ("user", environment.get_template(f"{stage}.j2").render(**rendered)),
     )
