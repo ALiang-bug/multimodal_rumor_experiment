@@ -2,6 +2,7 @@
 
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
+from dataclasses import replace
 import json
 from pathlib import Path
 import re
@@ -14,7 +15,7 @@ from .pipeline import JobFailed, execute
 from .provenance import run_source_tasks
 from .qa import solver_projection
 from .records import record_envelope, stage_record
-from .requests import build_request
+from .requests import build_request, visible_material
 from .snapshot import snapshot_records
 from .state import State
 from .validation import ID_FIELDS, canonical_hash
@@ -61,19 +62,26 @@ def _code_revision(contract):
 def _can_resume_revision(contract, pinned, current):
     if pinned == current:
         return True
-    # A direct patch can opt in to preserving batch IDs if it changes only execution code.
+    # Each runtime-only patch must explicitly authorize resuming its direct parent.
     def git(*args):
         return subprocess.run(["git", *args], cwd=contract.root, capture_output=True, text=True)
 
-    metadata = git("log", "-1", "--format=%P%n%(trailers:key=Runtime-Resume-From,valueonly)", current)
-    if metadata.returncode or metadata.stdout.split() != [pinned, pinned]:
+    if git("merge-base", "--is-ancestor", pinned, current).returncode:
         return False
-    changed = git("diff", "--name-only", pinned, current)
-    allowed = {"rumorlab/state.py", "rumorlab/pipeline.py", "rumorlab/pilot.py"}
-    if changed.returncode or any(path not in allowed and not path.startswith(("docs/", "tests/"))
-                                 for path in changed.stdout.splitlines()):
-        return False
-    return git("diff", "--quiet", "HEAD", "--", "rumorlab", "configs", "prompts", "schemas").returncode == 0
+    allowed = {"rumorlab/state.py", "rumorlab/pipeline.py", "rumorlab/pilot.py", "rumorlab/cli.py",
+               "rumorlab/requests.py", "rumorlab/vllm.py", "scripts/run_val100_baseline.sh"}
+    while current != pinned:
+        metadata = git("log", "-1", "--format=%P%n%(trailers:key=Runtime-Resume-From,valueonly)", current)
+        fields = metadata.stdout.split()
+        if metadata.returncode or len(fields) != 2 or fields[0] != fields[1]:
+            return False
+        parent = fields[0]
+        changed = git("diff", "--name-only", parent, current)
+        if changed.returncode or any(path not in allowed and not path.startswith(("docs/", "tests/"))
+                                     for path in changed.stdout.splitlines()):
+            return False
+        current = parent
+    return git("diff", "--quiet", "HEAD", "--", "rumorlab", "configs", "prompts", "schemas", "scripts").returncode == 0
 
 
 def _check_budget(contract, role, work_count):
@@ -94,12 +102,14 @@ def _save_record(state, contract, record):
         )
 
 
-def _model_job(state, contract, client, manifest, stage, sample, claim, task, evidence, media_root, target, approvals):
+def _model_job(state, contract, client, manifest, stage, sample, claim, task, evidence, media_root, target, approvals,
+               *, request=None, prepared=None):
     dependencies = [(sample["sample_id"], sample["content_hash"]),
                     (manifest["split_manifest_id"], manifest["split_manifest_id"].removeprefix("split_"))]
     available = [evidence[eid] for eid in sample["evidence_ids"]]
     dependencies.extend((item["evidence_id"], item["content_hash"]) for item in available)
-    request = build_request(contract, stage, task, sample, claim, available, media_root, upstream=target)
+    if request is None:
+        request = build_request(contract, stage, task, sample, claim, available, media_root, upstream=target)
     if target is not None:
         dependencies.extend(_record_dependencies(target))
     for approval in approvals:
@@ -112,6 +122,7 @@ def _model_job(state, contract, client, manifest, stage, sample, claim, task, ev
             state, contract, request, sample["sample_id"], dependencies, client,
             script_hash=manifest["run_id"], claim=claim,
             labels=target["payload"]["labels"] if stage == "generate_qa" else None,
+            prepared=prepared,
         )
     except JobFailed as exc:
         event = state.db.execute(
@@ -153,17 +164,14 @@ def _record_dependencies(record):
         yield record_id.removeprefix(kind + "_"), record["content_hash"]
 
 
-def _run_model_jobs(state, contract, client, manifest, stage, evidence, media_root, jobs, workers):
+def _dispatch_jobs(state, jobs, workers, run_job):
     if workers == 1:
-        return [_model_job(state, contract, client, manifest, stage, sample, claim, task, evidence,
-                           media_root, target, approvals) for sample, claim, task, target, approvals in jobs]
+        return [run_job(state, job) for job in jobs]
 
     def run(job):
-        sample, claim, task, target, approvals = job
         # SQLite connections are thread-local, while requests wait outside write transactions.
-        with closing(State(state.path)) as worker_state:
-            return _model_job(worker_state, contract, client, manifest, stage, sample, claim, task,
-                              evidence, media_root, target, approvals)
+        with closing(State(state.path, initialize=False)) as worker_state:
+            return run_job(worker_state, job)
 
     executor = ThreadPoolExecutor(max_workers=workers)
     try:
@@ -172,7 +180,16 @@ def _run_model_jobs(state, contract, client, manifest, stage, evidence, media_ro
         executor.shutdown(cancel_futures=True)
 
 
-def _finish(state, manifest, stage, results, workers, started, *, execution_revision=None):
+def _run_model_jobs(state, contract, client, manifest, stage, evidence, media_root, jobs, workers):
+    def run(worker_state, job):
+        sample, claim, task, target, approvals = job
+        return _model_job(worker_state, contract, client, manifest, stage, sample, claim, task,
+                          evidence, media_root, target, approvals)
+
+    return _dispatch_jobs(state, jobs, workers, run)
+
+
+def _finish(state, manifest, stage, results, workers, started, *, execution_revision=None, timings=None):
     report = {"stage": stage, "run_id": manifest["runtime"]["source_run_id"],
               "batch_id": manifest["runtime"]["batch_id"], "manifest_id": manifest["run_id"],
               "samples": manifest["runtime"]["sample_count"], "results": results,
@@ -180,6 +197,8 @@ def _finish(state, manifest, stage, results, workers, started, *, execution_revi
               "failed": sum(item["status"] == "FAILED" for item in results)}
     if execution_revision is not None:
         report["execution_code_revision"] = execution_revision
+    if timings is not None:
+        report["run_timings"] = timings
     with state.db:
         if stage == "annotate":
             state.db.execute("UPDATE pilot_batches SET annotate_report = ? WHERE manifest_id = ?",
@@ -193,40 +212,14 @@ def _finish(state, manifest, stage, results, workers, started, *, execution_revi
     return report
 
 
-def annotate(state, contract, run_id, batch_id, limit, annotator_lock, reviewer_lock, *, offset=0, workers=1):
-    started = monotonic()
+def _annotation_manifest(state, contract, run_id, batch_id, selected_ids, row, source, evidence_version,
+                         plan_digest, split_id, locks, execution_revision, workers):
     existing = _batch(state, run_id, batch_id)
-    row, source, records, samples, evidence = _inputs(state.db, run_id)
-    if not 1 <= limit <= len(samples):
-        raise ValueError(f"--limit must be between 1 and {len(samples)}")
-    if not 0 <= offset <= len(samples) - limit:
-        raise ValueError(f"--offset must be between 0 and {len(samples) - limit} for --limit {limit}")
-    sample_ids = list(dict.fromkeys(item["sample_id"] for item in source["selection"]))
-    if set(sample_ids) != set(samples):
-        raise ValueError("Import manifest and sample IDs disagree")
-    if limit < len(samples):
-        sample_ids.sort(key=lambda sid: canonical_hash([contract.experiment["seed"], sid]))
-    selected_ids = sample_ids[offset:offset + limit]
-    selected = [samples[sid] for sid in selected_ids]
-    tasks = contract.experiment["annotation"]["model_tasks"]
-    work_count = sum(len(sample["target_claims"]) for sample in selected) * len(tasks)
-    for role in ("annotator", "reviewer"):
-        _check_budget(contract, role, work_count)
-    locks = {
-        "annotator": load_lock(contract, "annotator", annotator_lock),
-        "reviewer": load_lock(contract, "reviewer", reviewer_lock),
-    }
-    execution_revision = _code_revision(contract)
     revision = execution_revision
     if existing:
         pinned = json.loads(existing["manifest"])["code_revision"]
         if _can_resume_revision(contract, pinned, execution_revision):
             revision = pinned
-    plan_digest, plan = freeze_plan(state, run_id, records, contract.experiment["splitting"])
-    apply_plan(records, plan)
-    if any(sample["split"] != "dev" for sample in selected):
-        raise ValueError("Pilot selection must remain entirely in dev")
-    split_id = "split_" + plan_digest
     input_hash = canonical_hash([run_id, batch_id, row["digest"], selected_ids, plan_digest,
                                  revision, contract.config_hash, [digest for _, digest in locks.values()]])
     manifest_id = "pilot_" + input_hash
@@ -239,40 +232,111 @@ def annotate(state, contract, run_id, batch_id, limit, annotator_lock, reviewer_
         "run_id": manifest_id, "mode": "real", "code_revision": revision,
         "config_hash": contract.config_hash, "label_schema_version": contract.labels["label_schema_version"],
         "dataset_version": "sha256:" + source["annotation_sha256"],
-        "evidence_version": "sha256:" + canonical_hash(sorted((eid, ev["content_hash"]) for eid, ev in evidence.items())),
+        "evidence_version": evidence_version,
         "split_manifest_id": split_id,
         "models": {role: {**{key: lock[key] for key in model_fields}, "backend": model_settings[role]["backend"],
                           "thinking_enabled": model_settings[role]["generation"]["thinking"]}
                    for role, (lock, _) in locks.items()},
         "prompt_versions": {stage: contract.experiment["annotation"]["prompt_version"]
                             for stage in ("annotate", "review_labels")},
-        "runtime": {"source_run_id": run_id, "batch_id": batch_id, "sample_count": limit, "workers": workers,
+        "runtime": {"source_run_id": run_id, "batch_id": batch_id, "sample_count": len(selected_ids), "workers": workers,
                     "decoding_schema": "structural-with-task-enums; full schema validated locally",
                     **{f"{role}_lock_sha256": digest for role, (_, digest) in locks.items()}},
         "seed": contract.experiment["seed"], "status": "RUNNING",
     }
     manifest = {**record_envelope("run_manifest", data, input_hash, is_mock=False), **data}
     contract.validator("run_manifest").validate(manifest)
+    return manifest
+
+
+def annotate(state, contract, run_id, batch_id, limit, annotator_lock, reviewer_lock, *, offset=0, workers=1):
+    return annotate_batches(state, contract, run_id, [(batch_id, offset, limit)], annotator_lock,
+                            reviewer_lock, workers=workers)[0]
+
+
+def annotate_batches(state, contract, run_id, batches, annotator_lock, reviewer_lock, *, workers):
+    started = monotonic()
+    row, source, records, samples, evidence = _inputs(state.db, run_id)
+    sample_ids = list(dict.fromkeys(item["sample_id"] for item in source["selection"]))
+    if set(sample_ids) != set(samples):
+        raise ValueError("Import manifest and sample IDs disagree")
+    if len(batches) != 1 or batches[0][2] < len(samples):
+        sample_ids.sort(key=lambda sid: canonical_hash([contract.experiment["seed"], sid]))
+    tasks = contract.experiment["annotation"]["model_tasks"]
+    locks = {"annotator": load_lock(contract, "annotator", annotator_lock),
+             "reviewer": load_lock(contract, "reviewer", reviewer_lock)}
+    revision = _code_revision(contract)
+    plan_digest, plan = freeze_plan(state, run_id, records, contract.experiment["splitting"])
+    apply_plan(records, plan)
+    split_id = "split_" + plan_digest
+    evidence_version = "sha256:" + canonical_hash(sorted((eid, ev["content_hash"]) for eid, ev in evidence.items()))
+    selections, occupied = [], set()
+    for batch_id, offset, limit in batches:
+        if not 1 <= limit <= len(samples):
+            raise ValueError(f"--limit must be between 1 and {len(samples)}")
+        if not 0 <= offset <= len(samples) - limit:
+            raise ValueError(f"--offset must be between 0 and {len(samples) - limit} for --limit {limit}")
+        ids = sample_ids[offset:offset + limit]
+        if occupied.intersection(ids):
+            raise ValueError("Annotation batches cannot overlap")
+        occupied.update(ids)
+        selected = [samples[sid] for sid in ids]
+        if any(sample["split"] != "dev" for sample in selected):
+            raise ValueError("Pilot selection must remain entirely in dev")
+        work_count = sum(len(sample["target_claims"]) for sample in selected) * len(tasks)
+        for role in locks:
+            _check_budget(contract, role, work_count)
+        manifest = _annotation_manifest(state, contract, run_id, batch_id, ids, row, source, evidence_version,
+                                        plan_digest, split_id, locks, revision, workers)
+        selections.append((manifest, selected))
+
     client = connect_role(contract, "annotator")
+    media_root = Path(row["media_root"])
+    jobs = []
+    for manifest, selected in selections:
+        for sample in selected:
+            available = [evidence[eid] for eid in sample["evidence_ids"]]
+            material = visible_material(sample, available, media_root, solver=False)
+            for claim in sample["target_claims"]:
+                for task in tasks:
+                    request = build_request(contract, "annotate", task, sample, claim, available, media_root,
+                                            material=material)
+                    jobs.append((manifest, sample, claim, task, replace(request, images=()), client.prepare(request)))
+
     with state.db:
-        state.db.execute(
-            """INSERT OR IGNORE INTO pilot_batches (source_run_id, batch_id, manifest_id, manifest)
-               VALUES (?, ?, ?, ?)""", (run_id, batch_id, manifest_id, json.dumps(manifest)),
-        )
-        existing = _batch(state, run_id, batch_id)
-        if existing["manifest_id"] != manifest_id:
-            raise ValueError("Batch inputs changed. Use a new --batch-id")
-        manifest = json.loads(existing["manifest"])
-    output = []
-    results = run_source_tasks(
-        state, contract, selected, evidence.values(), (split_id, plan_digest), manifest, output,
-    )
-    for record in output:
-        _save_record(state, contract, record)
-    jobs = ((sample, claim, task, None, ()) for sample in selected for claim in sample["target_claims"] for task in tasks)
-    results.extend(_run_model_jobs(state, contract, client, manifest, "annotate", evidence,
-                                  Path(row["media_root"]), jobs, workers))
-    return _finish(state, manifest, "annotate", results, workers, started, execution_revision=execution_revision)
+        for manifest, _ in selections:
+            batch_id = manifest["runtime"]["batch_id"]
+            state.db.execute(
+                """INSERT OR IGNORE INTO pilot_batches (source_run_id, batch_id, manifest_id, manifest)
+                   VALUES (?, ?, ?, ?)""", (run_id, batch_id, manifest["run_id"], json.dumps(manifest)),
+            )
+            if _batch(state, run_id, batch_id)["manifest_id"] != manifest["run_id"]:
+                raise ValueError("Batch inputs changed. Use a new --batch-id")
+
+    def run(worker_state, job):
+        manifest, sample, claim, task, request, body = job
+        return _model_job(worker_state, contract, client, manifest, "annotate", sample, claim, task,
+                          evidence, media_root, None, (), request=request, prepared=body)
+
+    inference_started = monotonic()
+    results = {manifest["run_id"]: [] for manifest, _ in selections}
+    for job, result in zip(jobs, _dispatch_jobs(state, jobs, workers, run)):
+        results[job[0]["run_id"]].append(result)
+    source_started = monotonic()
+    for manifest, selected in selections:
+        output = []
+        source_results = run_source_tasks(state, contract, selected, evidence.values(), (split_id, plan_digest),
+                                          manifest, output)
+        for record in output:
+            _save_record(state, contract, record)
+        results[manifest["run_id"]][:0] = source_results
+    timings = {"samples": len(occupied), "prepared_requests": len(jobs),
+               "prepared_wire_bytes": sum(len(job[-1]) for job in jobs),
+               "prepare_seconds": round(inference_started - started, 3),
+               "model_seconds": round(source_started - inference_started, 3),
+               "source_seconds": round(monotonic() - source_started, 3)}
+    return [_finish(state, manifest, "annotate", results[manifest["run_id"]], workers, started,
+                    execution_revision=revision, timings=timings) for manifest, _ in selections]
 
 
 def review_labels(state, contract, run_id, batch_id, reviewer_lock, *, workers=1):

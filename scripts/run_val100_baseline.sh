@@ -15,14 +15,37 @@ output=runs/m2-val100-baseline
 mkdir -p "$output"
 exit_status=0
 
+if [[ "$stage" == annotate ]]; then
+  combined="$output/annotate-combined.json"
+  echo "Preparing all 100 val samples for one inference queue"
+  python -m rumorlab annotate --run-id mmfakebench-val \
+    --batch-id m2-val100-baseline --batch-offsets 0 25 50 75 --limit 25 \
+    --annotator-lock runs/m1-qwen/model_lock.json --reviewer-lock runs/m1-gemma/model_lock.json \
+    > "$combined" || exit_status=$?
+  if [[ ! -s "$combined" ]]; then
+    exit "$exit_status"
+  fi
+  python - "$output" <<'PY'
+import json
+from pathlib import Path
+import sys
+
+output = Path(sys.argv[1])
+combined = json.loads((output / "annotate-combined.json").read_text(encoding="utf-8"))
+print(combined["run_timings"])
+for report in combined["batches"]:
+    offset = report["batch_id"].rsplit("-", 1)[1]
+    (output / f"annotate-{offset}.json").write_text(json.dumps(report, ensure_ascii=False), encoding="utf-8")
+    print(report["batch_id"], {key: report[key] for key in ("samples", "workers", "failed")})
+PY
+  exit "$exit_status"
+fi
+
 for offset in 0 25 50 75; do
   batch_id="m2-val100-baseline-$offset"
   report="$output/$stage-$offset.json"
   args=("$stage" --run-id mmfakebench-val --batch-id "$batch_id"
         --reviewer-lock runs/m1-gemma/model_lock.json)
-  if [[ "$stage" == annotate ]]; then
-    args+=(--offset "$offset" --limit 25 --annotator-lock runs/m1-qwen/model_lock.json)
-  fi
   echo "Running $stage for $batch_id"
   if python -m rumorlab "${args[@]}" > "$report"; then
     :

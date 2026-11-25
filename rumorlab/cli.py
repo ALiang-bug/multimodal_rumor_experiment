@@ -66,6 +66,8 @@ def main():
     smoke.add_argument("--provenance", action="store_true", help="Also derive source labels from the manifest")
     annotate = commands.add_parser("annotate", help="Annotate a bounded MMFakeBench val batch")
     annotate.add_argument("--offset", type=int, default=0, help="Number of samples to skip in the fixed val ordering")
+    annotate.add_argument("--batch-offsets", type=int, nargs="+",
+                          help="Share one inference queue across batches named <batch-id>-<offset>; --limit applies per batch")
     review_labels = commands.add_parser("review-labels", help="Review the saved annotations of a val batch")
     generate_qa = commands.add_parser("generate-qa", help="Generate QA from accepted val annotations")
     review_qa = commands.add_parser("review-qa", help="Review the saved QA candidates of a val batch")
@@ -139,8 +141,18 @@ def main():
             try:
                 batch = (state, contract, args.run_id, args.batch_id)
                 if args.command == "annotate":
-                    report = pilot.annotate(*batch, args.limit, args.annotator_lock, args.reviewer_lock,
-                                            offset=args.offset, workers=workers)
+                    if args.batch_offsets is None:
+                        report = pilot.annotate(*batch, args.limit, args.annotator_lock, args.reviewer_lock,
+                                                offset=args.offset, workers=workers)
+                    else:
+                        if args.offset:
+                            raise ValueError("Use --batch-offsets or --offset")
+                        batches = [(f"{args.batch_id}-{offset}", offset, args.limit) for offset in args.batch_offsets]
+                        reports = pilot.annotate_batches(*batch[:3], batches, args.annotator_lock, args.reviewer_lock,
+                                                         workers=workers)
+                        report = {"stage": "annotate", "batches": reports,
+                                  "run_timings": reports[0]["run_timings"],
+                                  "failed": sum(item["failed"] for item in reports)}
                 elif args.command == "review-labels":
                     report = pilot.review_labels(*batch, args.reviewer_lock, workers=workers)
                 elif args.command == "generate-qa":

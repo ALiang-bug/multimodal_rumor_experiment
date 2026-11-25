@@ -52,7 +52,9 @@ class VllmModel:
         headers = {"Content-Type": "application/json"}
         if self.token:
             headers["Authorization"] = f"Bearer {self.token}"
-        data = json.dumps(body).encode("utf-8") if body is not None else None
+        data = body
+        if body is not None and not isinstance(body, bytes):
+            data = json.dumps(body).encode("utf-8")
         request = Request(self.base_url + path, data=data, headers=headers)
         with self.opener.open(request, timeout=self.timeout) as response:
             return json.load(response)
@@ -65,11 +67,11 @@ class VllmModel:
         except (OSError, KeyError, TypeError, ValueError) as exc:
             raise ValueError(f"Could not verify vLLM model identity ({type(exc).__name__})") from exc
 
-    def generate(self, request):
-        response, _ = self.complete(request)
+    def generate(self, request, *, prepared=None):
+        response, _ = self.complete(request, prepared=prepared)
         return response
 
-    def complete(self, request, *, seed=None):
+    def _body(self, request, seed):
         messages = [{"role": role, "content": content} for role, content in request.messages]
         assets = request.visible_inputs["images"]
         if len(assets) != len(request.images):
@@ -88,12 +90,18 @@ class VllmModel:
         decoding_schema = request.response_schema
         if request.stage in {"annotate", "review_labels", "generate_qa", "review_qa"}:
             decoding_schema = _decoding_schema(decoding_schema, request.task_id)
-        body = {
+        return {
             **generation, "model": self.settings["model_id"], "messages": messages,
             "stream": False, "response_format": {"type": "json_schema", "json_schema": {
                 "name": "rumorlab_response", "schema": decoding_schema,
             }},
         }
+
+    def prepare(self, request):
+        return json.dumps(self._body(request, None)).encode("utf-8")
+
+    def complete(self, request, *, seed=None, prepared=None):
+        body = self._body(request, seed) if prepared is None else prepared
         started = monotonic()
         finish, provider_id, final, usage, reasoning_seen = "error", "", "", {}, False
         try:

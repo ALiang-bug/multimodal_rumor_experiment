@@ -22,6 +22,7 @@ from rumorlab.requests import build_request
 from rumorlab.snapshot import snapshot_records
 from rumorlab.state import LeaseLost, State
 from rumorlab.validation import validate_rows
+from rumorlab.vllm import VllmModel
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -100,6 +101,8 @@ class PilotFixture:
         def request(client, path, body=None):
             if path == "/models":
                 return {"data": [{"id": client.settings["model_id"]}]}
+            if isinstance(body, bytes):
+                body = json.loads(body)
             self.calls.append(body)
             return {"id": "fixture", "choices": [{"finish_reason": "stop", "message": {
                 "content": json.dumps(reply_payload(body)), "reasoning": "never persisted",
@@ -115,6 +118,42 @@ class PilotFixture:
 
 
 class AnnotateTests(PilotFixture, TestCase):
+    def test_prepares_one_queue_across_batches_before_starting_provenance(self):
+        overlap = Barrier(8, timeout=5)
+        prepared = []
+        original_prepare = VllmModel.prepare
+
+        def prepare(client, request):
+            wire = original_prepare(client, request)
+            self.assertEqual(wire, json.dumps(client._body(request, None)).encode("utf-8"))
+            prepared.append(request.request_id)
+            return wire
+
+        def reply(body):
+            self.assertEqual(len(prepared), 8)
+            overlap.wait()
+            properties = body["response_format"]["json_schema"]["schema"]["properties"]
+            sample = next(row for row in self.samples if row["target_claims"][0] == properties["target_claim"]["const"])
+            return self.payload(properties["task_id"]["const"], sample)
+
+        from rumorlab.provenance import run_source_tasks
+
+        def sources(*args):
+            self.assertEqual(len(self.calls), 8)
+            return run_source_tasks(*args)
+
+        offsets = ("--batch-offsets", "0", "1")
+        with (self.transport(reply), patch.object(VllmModel, "prepare", new=prepare),
+              patch("rumorlab.pilot.run_source_tasks", new=sources)):
+            group = self.command("annotate", workers=8, extra=offsets)
+        self.assertEqual(group["failed"], 0)
+        self.assertEqual(group["run_timings"]["prepared_requests"], 8)
+        self.assertEqual([report["batch_id"] for report in group["batches"]], [f"{BATCH}-0", f"{BATCH}-1"])
+
+        with self.transport(lambda _: self.fail("Cached batch must not generate again")):
+            resumed = self.command("annotate", workers=8, extra=offsets)
+        self.assertTrue(all(row["cached"] for report in resumed["batches"] for row in report["results"]))
+
     def test_lease_failure_isolated_and_resume_reuses_completed_results(self):
         original_finish = State.finish
         interrupted = set()

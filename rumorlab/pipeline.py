@@ -22,7 +22,8 @@ class JobFailed(ValueError):
         self.technical_error = technical_error
 
 
-def execute(state, contract, request, subject, dependencies, client, *, script_hash, claim=None, labels=None):
+def execute(state, contract, request, subject, dependencies, client, *, script_hash, claim=None, labels=None,
+            prepared=None):
     settings = contract.experiment["runtime"]
     input_hash = canonical_hash([request.request_id, script_hash])
     while True:
@@ -36,7 +37,7 @@ def execute(state, contract, request, subject, dependencies, client, *, script_h
             raise JobFailed(request, job_id)
         try:
             with state.keep_lease(job_id, lease, settings["lease_seconds"], settings["heartbeat_seconds"]):
-                response = client.generate(request)
+                response = client.generate(request) if prepared is None else client.generate(request, prepared=prepared)
                 category = None
                 if response.technical_error:
                     category = "technical"

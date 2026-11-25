@@ -87,12 +87,13 @@ def _response_schema(contract, definition, task_id):
     return expand(definitions[definition])
 
 
-def build_request(contract, stage, task_id, sample, claim, evidence, media_root, *, upstream=None):
+def build_request(contract, stage, task_id, sample, claim, evidence, media_root, *, upstream=None, material=None):
     role, definition = DEFINITIONS[stage]
     if claim not in sample["target_claims"]:
         raise ValueError("Claim is outside the sample")
     solver = stage in {"generate_qa", "review_qa"}
-    material, images = visible_material(sample, evidence, media_root, solver=solver)
+    material, images = (visible_material(sample, evidence, media_root, solver=solver)
+                        if material is None else material)
     schema = _response_schema(contract, definition, task_id)
     if stage in {"annotate", "review_labels", "generate_qa", "review_qa"}:
         evidence_ids = [item["evidence_id"] for item in material["evidence"]]
