@@ -1,12 +1,13 @@
 """Run independent model stages on bounded MMFakeBench val batches."""
 
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import closing
 from dataclasses import replace
 import json
 from pathlib import Path
 import re
 import subprocess
+from threading import Event
 from time import monotonic
 
 from .grouping import apply_plan, freeze_plan
@@ -185,6 +186,45 @@ def _dispatch_jobs(state, jobs, workers, run_job):
         executor.shutdown(cancel_futures=True)
 
 
+def prefetch_groups(state, batches, size, run_group):
+    """Keep at most one prepared group ahead of the active inference group."""
+    def submit(executor, group, admission):
+        ready = Event()
+
+        def before_dispatch():
+            ready.set()
+            admission.result()
+
+        def run():
+            try:
+                with closing(State(state.path, initialize=False)) as group_state:
+                    return run_group(group_state, group, before_dispatch)
+            finally:
+                ready.set()
+
+        return executor.submit(run), ready
+
+    output = []
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        admission = Future()
+        admission.set_result(None)
+        active, ready = submit(executor, batches[:size], admission)
+        for index in range(size, len(batches), size):
+            ready.wait()
+            if active.done():
+                active.result()
+            admission = Future()
+            try:
+                upcoming, next_ready = submit(executor, batches[index:index + size], admission)
+                output.extend(active.result())
+                admission.set_result(None)
+            finally:
+                admission.cancel()
+            active, ready = upcoming, next_ready
+        output.extend(active.result())
+    return output
+
+
 def _run_model_jobs(state, contract, client, manifest, stage, evidence, media_root, jobs, workers):
     def run(worker_state, job):
         sample, claim, task, target, approvals = job
@@ -268,7 +308,8 @@ def _ordered_sample_ids(source, samples, seed, *, subset):
     return sample_ids
 
 
-def annotate_batches(state, contract, run_id, batches, annotator_lock, reviewer_lock, *, workers):
+def annotate_batches(state, contract, run_id, batches, annotator_lock, reviewer_lock, *, workers,
+                     before_dispatch=None):
     started = monotonic()
     row, source, records, samples, evidence = _inputs(state.db, run_id)
     sample_ids = _ordered_sample_ids(source, samples, contract.experiment["seed"],
@@ -331,6 +372,9 @@ def annotate_batches(state, contract, run_id, batches, annotator_lock, reviewer_
                        manifest["run_id"])
         for manifest, sample, _, _, request, _ in jobs
     )
+    queue_finished = monotonic()
+    if before_dispatch is not None:
+        before_dispatch()
 
     def run(worker_state, job):
         manifest, sample, claim, task, request, body = job
@@ -362,7 +406,8 @@ def annotate_batches(state, contract, run_id, batches, annotator_lock, reviewer_
                "newly_registered": newly_registered,
                "prepared_wire_bytes": sum(len(job[-1]) for job in jobs),
                "prepare_seconds": round(queue_started - started, 3),
-               "queue_seconds": round(inference_started - queue_started, 3),
+               "queue_seconds": round(queue_finished - queue_started, 3),
+               "dispatch_wait_seconds": round(inference_started - queue_finished, 3),
                "model_seconds": round(inference_finished - inference_started, 3),
                "source_prepare_seconds": round(source_prepare_seconds, 3),
                "source_seconds": round(monotonic() - inference_finished, 3)}
@@ -374,7 +419,8 @@ def review_labels(state, contract, run_id, batch_id, reviewer_lock, *, workers=1
     return review_label_batches(state, contract, run_id, [batch_id], reviewer_lock, workers=workers)[0]
 
 
-def review_label_batches(state, contract, run_id, batch_ids, reviewer_lock, *, workers):
+def review_label_batches(state, contract, run_id, batch_ids, reviewer_lock, *, workers,
+                         before_dispatch=None):
     started = monotonic()
     if len(set(batch_ids)) != len(batch_ids):
         raise ValueError("Review batch IDs must be distinct")
@@ -397,10 +443,11 @@ def review_label_batches(state, contract, run_id, batch_ids, reviewer_lock, *, w
                if item.get("record_id") and item["status"] == "VALIDATED"]
         _check_budget(contract, "reviewer", len(ids))
         selections.append((manifest, ids))
-    if not any(ids for _, ids in selections):
+    has_candidates = any(ids for _, ids in selections)
+    if not has_candidates and before_dispatch is None:
         raise ValueError("No validated model annotations available for review")
 
-    client = connect_role(contract, "reviewer")
+    client = connect_role(contract, "reviewer") if has_candidates else None
     media_root = Path(row["media_root"])
     jobs = []
     for manifest, ids in selections:
@@ -425,6 +472,9 @@ def review_label_batches(state, contract, run_id, batch_ids, reviewer_lock, *, w
                        manifest["run_id"])
         for manifest, sample, _, _, target, request, _ in jobs
     )
+    queue_finished = monotonic()
+    if before_dispatch is not None:
+        before_dispatch()
 
     def run(worker_state, job):
         manifest, sample, claim, task, target, request, body = job
@@ -438,7 +488,8 @@ def review_label_batches(state, contract, run_id, batch_ids, reviewer_lock, *, w
     timings = {"prepared_requests": len(jobs), "newly_registered": newly_registered,
                "prepared_wire_bytes": sum(len(job[-1]) for job in jobs),
                "prepare_seconds": round(queue_started - started, 3),
-               "queue_seconds": round(inference_started - queue_started, 3),
+               "queue_seconds": round(queue_finished - queue_started, 3),
+               "dispatch_wait_seconds": round(inference_started - queue_finished, 3),
                "model_seconds": round(monotonic() - inference_started, 3)}
     return [_finish(state, manifest, "review_labels", results[manifest["run_id"]], workers, started,
                     execution_revision=execution_revision, timings=timings) for manifest, _ in selections]

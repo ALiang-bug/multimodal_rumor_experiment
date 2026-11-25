@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 import shutil
 from tempfile import TemporaryDirectory
-from threading import Barrier, Event
+from threading import Barrier, Event, Lock
 from unittest import TestCase
 from unittest.mock import patch
 
@@ -114,6 +114,40 @@ class PilotFixture:
             }}]}
         return patch("rumorlab.vllm.VllmModel._request", new=request)
 
+    def assert_prefetched(self, stage, reply):
+        registered = []
+        next_registered = Event()
+        inference = Lock()
+        register_jobs = State.register_jobs
+
+        def register(state, jobs):
+            count = register_jobs(state, jobs)
+            registered.append(count)
+            if len(registered) == 2:
+                next_registered.set()
+            return count
+
+        def respond(body):
+            self.assertTrue(inference.acquire(blocking=False), "Two groups dispatched together")
+            try:
+                self.assertTrue(next_registered.wait(5), "No next group registered during inference")
+                return reply(body)
+            finally:
+                inference.release()
+
+        args = ("--batch-offsets", "0", "1", "--prefetch-group-size", "1")
+        with patch.object(State, "register_jobs", new=register), self.transport(respond):
+            report = self.command(stage, workers=1, extra=args)
+        self.assertEqual(len(registered), 2)
+        self.assertTrue(all(count > 0 for count in registered))
+        self.assertEqual([b["batch_id"] for b in report["batches"]], [f"{BATCH}-0", f"{BATCH}-1"])
+        self.assertEqual(len(report["run_timings"]["groups"]), 2)
+        self.calls.clear()
+        with self.transport(lambda _: self.fail("Completed jobs must be reused")):
+            resumed = self.command(stage, workers=1, extra=args)
+        self.assertFalse(self.calls)
+        self.assertEqual([g["newly_registered"] for g in resumed["run_timings"]["groups"]], [0, 0])
+
     def export(self):
         rows = snapshot_records(self.state, RUN)
         errors, _ = validate_rows(list(enumerate(rows, 1)), self.contract.schema, self.contract.labels,
@@ -123,6 +157,15 @@ class PilotFixture:
 
 
 class AnnotateTests(PilotFixture, TestCase):
+    def test_prefetches_and_registers_next_group_during_annotation(self):
+        def reply(body):
+            task = body["response_format"]["json_schema"]["schema"]["properties"]["task_id"]["const"]
+            messages = json.dumps(body["messages"])
+            sample = next(sample for sample in self.samples if sample["text"] in messages)
+            return self.payload(task, sample)
+
+        self.assert_prefetched("annotate", reply)
+
     def test_prepares_one_queue_and_overlaps_source_computation_without_source_writes(self):
         overlap = Barrier(8, timeout=5)
         source_started, model_started = Event(), Event()
@@ -443,6 +486,11 @@ class SingleLabelReviewTests(LabelFixture, TestCase):
 
 
 class ReviewTests(LabelFixture, TestCase):
+    def test_prefetches_and_registers_next_group_during_review(self):
+        self.seed_annotations("image_text_consistency", batch=f"{BATCH}-0", start=1)
+        self.seed_annotations("intent_analysis", batch=f"{BATCH}-1", start=2)
+        self.assert_prefetched("review-labels", lambda _: PASS_REVIEW)
+
     def test_prepares_and_registers_four_review_batches_before_shared_dispatch(self):
         offsets = ("0", "25", "50", "75")
         batch_ids = [f"{BATCH}-{offset}" for offset in offsets]

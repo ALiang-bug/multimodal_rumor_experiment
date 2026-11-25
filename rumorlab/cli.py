@@ -71,6 +71,9 @@ def main():
     review_labels = commands.add_parser("review-labels", help="Review the saved annotations of a val batch")
     review_labels.add_argument("--batch-offsets", type=int, nargs="+",
                                help="Share one inference queue across saved batches named <batch-id>-<offset>")
+    for command in (annotate, review_labels):
+        command.add_argument("--prefetch-group-size", type=int,
+                             help="Logical batches per inference group; prepare the next group in parallel")
     generate_qa = commands.add_parser("generate-qa", help="Generate QA from accepted val annotations")
     review_qa = commands.add_parser("review-qa", help="Review the saved QA candidates of a val batch")
     for command in (annotate, review_labels, generate_qa, review_qa):
@@ -139,6 +142,14 @@ def main():
             workers = args.workers if args.workers is not None else contract.experiment["runtime"]["workers_initial"]
             if type(workers) is not int or workers < 1:
                 raise ValueError("--workers must be a positive integer")
+            group_size = getattr(args, "prefetch_group_size", None)
+            if group_size is not None:
+                if group_size < 1 or not args.batch_offsets:
+                    raise ValueError("--prefetch-group-size requires a positive size and --batch-offsets")
+                offsets = sorted(args.batch_offsets)
+                width = args.limit if args.command == "annotate" else 1
+                if any(right - left < width for left, right in zip(offsets, offsets[1:])):
+                    raise ValueError("Prefetched batch offsets must be distinct and non-overlapping")
             state = State(args.state_db or contract.root / contract.experiment["paths"]["state_db"])
             try:
                 batch = (state, contract, args.run_id, args.batch_id)
@@ -150,8 +161,14 @@ def main():
                         if args.offset:
                             raise ValueError("Use --batch-offsets or --offset")
                         batches = [(f"{args.batch_id}-{offset}", offset, args.limit) for offset in args.batch_offsets]
-                        reports = pilot.annotate_batches(*batch[:3], batches, args.annotator_lock, args.reviewer_lock,
-                                                         workers=workers)
+                        def run_group(group_state, selected, before_dispatch=None):
+                            return pilot.annotate_batches(
+                                group_state, contract, args.run_id, selected, args.annotator_lock, args.reviewer_lock,
+                                workers=workers, before_dispatch=before_dispatch,
+                            )
+
+                        reports = (pilot.prefetch_groups(state, batches, group_size, run_group)
+                                   if group_size else run_group(state, batches))
                         report = {"stage": "annotate", "batches": reports,
                                   "run_timings": reports[0]["run_timings"],
                                   "failed": sum(item["failed"] for item in reports)}
@@ -160,7 +177,14 @@ def main():
                         report = pilot.review_labels(*batch, args.reviewer_lock, workers=workers)
                     else:
                         batch_ids = [f"{args.batch_id}-{offset}" for offset in args.batch_offsets]
-                        reports = pilot.review_label_batches(*batch[:3], batch_ids, args.reviewer_lock, workers=workers)
+                        def run_group(group_state, selected, before_dispatch=None):
+                            return pilot.review_label_batches(
+                                group_state, contract, args.run_id, selected, args.reviewer_lock,
+                                workers=workers, before_dispatch=before_dispatch,
+                            )
+
+                        reports = (pilot.prefetch_groups(state, batch_ids, group_size, run_group)
+                                   if group_size else run_group(state, batch_ids))
                         report = {"stage": "review_labels", "batches": reports,
                                   "run_timings": reports[0]["run_timings"],
                                   "failed": sum(item["failed"] for item in reports)}
@@ -171,6 +195,11 @@ def main():
                     report = pilot.review_qa(*batch, args.reviewer_lock, workers=workers, dry_run=args.dry_run)
             finally:
                 state.close()
+            if group_size:
+                report["run_timings"] = {
+                    "groups": [{"first_batch_id": item["batch_id"], **item["run_timings"]}
+                               for item in report["batches"][::group_size]],
+                }
             print(json.dumps(report, ensure_ascii=False))
             return 1 if report["failed"] else 0
         if args.command in {"audit", "evaluate"}:
