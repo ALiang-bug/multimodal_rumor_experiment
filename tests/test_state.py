@@ -1,5 +1,6 @@
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from threading import Event
 from unittest import TestCase
 from unittest.mock import patch
 
@@ -7,6 +8,19 @@ from rumorlab.state import State
 
 
 class StateTests(TestCase):
+    def test_heartbeat_keeps_slow_job_owned_past_initial_expiry(self):
+        with TemporaryDirectory() as directory:
+            state = State(Path(directory) / "state.sqlite3")
+            try:
+                job, lease, _ = state.claim("annotate", "sample", "intent_analysis", "a", [], .6)
+                with state.keep_lease(job, lease, .6, .05):
+                    Event().wait(.75)
+                    state.finish(job, lease, result={"content_hash": "finished"})
+                cached = state.claim("annotate", "sample", "intent_analysis", "a", [], .6)
+                self.assertEqual(cached, (job, None, {"content_hash": "finished"}))
+            finally:
+                state.close()
+
     def test_invalidated_version_revokes_transitive_leases_and_cache(self):
         with TemporaryDirectory() as directory:
             path = Path(directory) / "state.sqlite3"

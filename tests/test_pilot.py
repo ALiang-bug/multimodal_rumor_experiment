@@ -20,7 +20,7 @@ from rumorlab.qa import solver_projection
 from rumorlab.records import record_envelope, stage_record
 from rumorlab.requests import build_request
 from rumorlab.snapshot import snapshot_records
-from rumorlab.state import State
+from rumorlab.state import LeaseLost, State
 from rumorlab.validation import validate_rows
 
 
@@ -115,6 +115,37 @@ class PilotFixture:
 
 
 class AnnotateTests(PilotFixture, TestCase):
+    def test_lease_failure_isolated_and_resume_reuses_completed_results(self):
+        original_finish = State.finish
+        interrupted = set()
+
+        def expire_one(state, job_id, lease, **kwargs):
+            payload = (kwargs.get("result") or {}).get("payload", {})
+            if payload.get("task_id") == "intent_analysis" and not interrupted:
+                with state.db:
+                    state.db.execute("UPDATE jobs SET expires = 0 WHERE id = ?", (job_id,))
+                interrupted.add(job_id)
+                raise LeaseLost(f"Job lease lost: {job_id}")
+            return original_finish(state, job_id, lease, **kwargs)
+
+        def reply(body):
+            properties = body["response_format"]["json_schema"]["schema"]["properties"]
+            sample = next(row for row in self.samples if row["target_claims"][0] == properties["target_claim"]["const"])
+            return self.payload(properties["task_id"]["const"], sample)
+
+        with self.transport(reply), patch.object(State, "finish", new=expire_one):
+            first = self.command("annotate", expected=1)
+            self.assertEqual(first["failed"], 1)
+            self.assertEqual([row["technical_error"] for row in first["results"] if row["status"] == "FAILED"],
+                             ["lease_lost"])
+            self.assertEqual(len(self.calls), 4)
+            with (patch("rumorlab.pilot._code_revision", return_value="e" * 40),
+                  patch("rumorlab.pilot._can_resume_revision", return_value=True)):
+                resumed = self.command("annotate")
+        self.assertEqual((resumed["manifest_id"], resumed["failed"], len(self.calls)), (first["manifest_id"], 0, 5))
+        self.assertEqual(resumed["execution_code_revision"], "e" * 40)
+        self.assertEqual({row["job_id"] for row in first["results"]}, {row["job_id"] for row in resumed["results"]})
+
     def test_real_command_limits_work_and_resumes_without_another_generation(self):
         overlap = Barrier(2, timeout=5)
 

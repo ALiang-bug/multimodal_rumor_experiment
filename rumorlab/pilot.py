@@ -58,6 +58,24 @@ def _code_revision(contract):
     return revision
 
 
+def _can_resume_revision(contract, pinned, current):
+    if pinned == current:
+        return True
+    # A direct patch can opt in to preserving batch IDs if it changes only execution code.
+    def git(*args):
+        return subprocess.run(["git", *args], cwd=contract.root, capture_output=True, text=True)
+
+    metadata = git("log", "-1", "--format=%P%n%(trailers:key=Runtime-Resume-From,valueonly)", current)
+    if metadata.returncode or metadata.stdout.split() != [pinned, pinned]:
+        return False
+    changed = git("diff", "--name-only", pinned, current)
+    allowed = {"rumorlab/state.py", "rumorlab/pipeline.py", "rumorlab/pilot.py"}
+    if changed.returncode or any(path not in allowed and not path.startswith(("docs/", "tests/"))
+                                 for path in changed.stdout.splitlines()):
+        return False
+    return git("diff", "--quiet", "HEAD", "--", "rumorlab", "configs", "prompts", "schemas").returncode == 0
+
+
 def _check_budget(contract, role, work_count):
     runtime = contract.experiment["runtime"]
     calls = work_count * (1 + runtime["technical_max_retries"] + runtime["format_repair_max_attempts"])
@@ -103,8 +121,8 @@ def _model_job(state, contract, client, manifest, stage, sample, claim, task, ev
         error = json.loads(event["detail"]) if event else {}
         failure = error.get("error") or error
         return {**report, "job_id": exc.job_id, "status": "FAILED",
-                "category": failure.get("category"),
-                "technical_error": (failure.get("response") or {}).get("technical_error")}
+                "category": "technical" if exc.technical_error else failure.get("category"),
+                "technical_error": exc.technical_error or (failure.get("response") or {}).get("technical_error")}
     lock = manifest["models"][request.role]
     if stage == "generate_qa" and "skip_reason" in result["payload"]:
         return {**report, "job_id": result["job_id"], "cached": cached, "status": "SKIPPED",
@@ -154,12 +172,14 @@ def _run_model_jobs(state, contract, client, manifest, stage, evidence, media_ro
         executor.shutdown(cancel_futures=True)
 
 
-def _finish(state, manifest, stage, results, workers, started):
+def _finish(state, manifest, stage, results, workers, started, *, execution_revision=None):
     report = {"stage": stage, "run_id": manifest["runtime"]["source_run_id"],
               "batch_id": manifest["runtime"]["batch_id"], "manifest_id": manifest["run_id"],
               "samples": manifest["runtime"]["sample_count"], "results": results,
               "workers": workers, "elapsed_seconds": round(monotonic() - started, 3),
               "failed": sum(item["status"] == "FAILED" for item in results)}
+    if execution_revision is not None:
+        report["execution_code_revision"] = execution_revision
     with state.db:
         if stage == "annotate":
             state.db.execute("UPDATE pilot_batches SET annotate_report = ? WHERE manifest_id = ?",
@@ -196,7 +216,12 @@ def annotate(state, contract, run_id, batch_id, limit, annotator_lock, reviewer_
         "annotator": load_lock(contract, "annotator", annotator_lock),
         "reviewer": load_lock(contract, "reviewer", reviewer_lock),
     }
-    revision = _code_revision(contract)
+    execution_revision = _code_revision(contract)
+    revision = execution_revision
+    if existing:
+        pinned = json.loads(existing["manifest"])["code_revision"]
+        if _can_resume_revision(contract, pinned, execution_revision):
+            revision = pinned
     plan_digest, plan = freeze_plan(state, run_id, records, contract.experiment["splitting"])
     apply_plan(records, plan)
     if any(sample["split"] != "dev" for sample in selected):
@@ -247,7 +272,7 @@ def annotate(state, contract, run_id, batch_id, limit, annotator_lock, reviewer_
     jobs = ((sample, claim, task, None, ()) for sample in selected for claim in sample["target_claims"] for task in tasks)
     results.extend(_run_model_jobs(state, contract, client, manifest, "annotate", evidence,
                                   Path(row["media_root"]), jobs, workers))
-    return _finish(state, manifest, "annotate", results, workers, started)
+    return _finish(state, manifest, "annotate", results, workers, started, execution_revision=execution_revision)
 
 
 def review_labels(state, contract, run_id, batch_id, reviewer_lock, *, workers=1):
@@ -259,7 +284,10 @@ def review_labels(state, contract, run_id, batch_id, reviewer_lock, *, workers=1
     _, lock_hash = load_lock(contract, "reviewer", reviewer_lock)
     if lock_hash != manifest["runtime"]["reviewer_lock_sha256"]:
         raise ValueError("Reviewer model lock differs from the annotated batch")
-    if manifest["config_hash"] != contract.config_hash or manifest["code_revision"] != _code_revision(contract):
+    execution_revision = _code_revision(contract)
+    if manifest["config_hash"] != contract.config_hash or not _can_resume_revision(
+        contract, manifest["code_revision"], execution_revision
+    ):
         raise ValueError("Use the same code and configuration as the annotated batch")
     row, _, _, samples, evidence = _inputs(state.db, run_id)
     ids = [item["record_id"] for item in json.loads(batch["annotate_report"])["results"]
@@ -276,7 +304,7 @@ def review_labels(state, contract, run_id, batch_id, reviewer_lock, *, workers=1
         jobs.append((samples[target["sample_id"]], claim, task, target, ()))
     results = _run_model_jobs(state, contract, client, manifest, "review_labels", evidence,
                               Path(row["media_root"]), jobs, workers)
-    return _finish(state, manifest, "review_labels", results, workers, started)
+    return _finish(state, manifest, "review_labels", results, workers, started, execution_revision=execution_revision)
 
 
 def generate_qa(state, contract, run_id, batch_id, label_batch_id, limit, annotator_lock, reviewer_lock,

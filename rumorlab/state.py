@@ -4,16 +4,25 @@ import json
 import sqlite3
 import time
 import uuid
+from contextlib import closing, contextmanager
+from threading import Event, Thread
+
+
+class LeaseLost(ValueError):
+    pass
 
 from .validation import canonical_hash
 
 
 class State:
-    def __init__(self, path):
+    def __init__(self, path, *, initialize=True, timeout=30):
         self.path = path
-        path.parent.mkdir(parents=True, exist_ok=True)
-        self.db = sqlite3.connect(path, timeout=30)
+        if initialize:
+            path.parent.mkdir(parents=True, exist_ok=True)
+        self.db = sqlite3.connect(path, timeout=timeout)
         self.db.row_factory = sqlite3.Row
+        if not initialize:
+            return
         self.db.executescript("""
             PRAGMA journal_mode = WAL;
             CREATE TABLE IF NOT EXISTS imports (
@@ -164,6 +173,7 @@ class State:
 
     def heartbeat(self, job_id, lease, lease_seconds):
         with self.db:
+            self.db.execute("BEGIN IMMEDIATE")
             now = time.time()
             updated = self.db.execute(
                 """UPDATE jobs SET expires = ? WHERE id = ? AND lease = ?
@@ -171,8 +181,43 @@ class State:
                 (now + lease_seconds, job_id, lease, now),
             )
             if updated.rowcount != 1:
-                raise ValueError(f"Job lease lost: {job_id}")
+                raise LeaseLost(f"Job lease lost: {job_id}")
             self._event(job_id, "RUNNING", {"lease": lease, "expires": now + lease_seconds})
+
+    @contextmanager
+    def keep_lease(self, job_id, lease, lease_seconds, heartbeat_seconds):
+        if lease_seconds <= 0 or heartbeat_seconds <= 0:
+            raise ValueError("Lease and heartbeat intervals must be positive")
+        interval = min(heartbeat_seconds, lease_seconds / 3)
+        stopped = Event()
+        errors = []
+
+        def renew():
+            if stopped.wait(interval):
+                return
+            try:
+                with closing(State(self.path, initialize=False, timeout=min(5, interval))) as state:
+                    while not stopped.is_set():
+                        try:
+                            state.heartbeat(job_id, lease, lease_seconds)
+                        except LeaseLost:
+                            return
+                        except sqlite3.OperationalError as exc:
+                            if getattr(exc, "sqlite_errorname", "") not in {"SQLITE_BUSY", "SQLITE_LOCKED"}:
+                                raise
+                        stopped.wait(interval)
+            except sqlite3.Error as exc:
+                errors.append(exc)
+
+        thread = Thread(target=renew, name="rumorlab-lease", daemon=True)
+        thread.start()
+        try:
+            yield
+        finally:
+            stopped.set()
+            thread.join()
+        if errors:
+            raise errors[0]
 
     def finish(self, job_id, lease, *, result=None, error=None, retry_limit=0):
         if (result is None) == (error is None):
@@ -184,7 +229,7 @@ class State:
                 (job_id, lease, time.time()),
             ).fetchone()
             if job is None:
-                raise ValueError(f"Job lease lost: {job_id}")
+                raise LeaseLost(f"Job lease lost: {job_id}")
             state = "SUCCEEDED" if error is None else "FAILED"
             if error and error["category"] in {"technical", "format"}:
                 category = error["category"]

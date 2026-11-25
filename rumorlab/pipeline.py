@@ -11,13 +11,15 @@ from .provenance import run_source_tasks
 from .qa import solver_projection, validate_candidate
 from .requests import build_request
 from .records import mock_manifest, stage_record
+from .state import LeaseLost
 from .validation import canonical_hash
 
 
 class JobFailed(ValueError):
-    def __init__(self, request, job_id):
+    def __init__(self, request, job_id, *, technical_error=None):
         super().__init__(f"Job failed: {request.stage}/{request.task_id} ({job_id})")
         self.job_id = job_id
+        self.technical_error = technical_error
 
 
 def execute(state, contract, request, subject, dependencies, client, *, script_hash, claim=None, labels=None):
@@ -32,51 +34,55 @@ def execute(state, contract, request, subject, dependencies, client, *, script_h
             return cached, True
         if lease is None:
             raise JobFailed(request, job_id)
-        response = client.generate(request)
-        category = None
-        if response.technical_error:
-            category = "technical"
-            retry_limit = settings["technical_max_retries"]
-        elif not response.schema_valid:
-            category = "format"
-            retry_limit = settings["format_repair_max_attempts"]
-            if request.stage in {"generate_qa", "review_qa"}:
-                retry_limit = min(retry_limit, settings["qa_format_revision_max_attempts"])
-        elif request.stage == "generate_qa" and "skip_reason" in response.parsed_payload:
-            payload = response.parsed_payload
-        else:
-            payload = response.parsed_payload
-            visible = {item["evidence_id"] for item in request.visible_inputs["evidence"]}
-            suggested = payload.get("suggested_annotation")
-            cites = set(payload["evidence_ids"])
-            if suggested:
-                cites.update(suggested["evidence_ids"])
-            invalid = not cites <= visible
-            annotation = payload if request.stage == "annotate" else suggested
-            if annotation is not None and request.stage in {"annotate", "review_labels"}:
-                invalid |= (request.stage == "annotate" or claim is not None) and annotation["target_claim"] != claim
-                invalid |= annotation["applicability"] == "not_applicable" and request.task_id != "reality_plausibility"
-            if request.stage == "generate_qa":
-                try:
-                    allowed = {item["code"] for item in contract.labels["tasks"][request.task_id]["labels"]}
-                    validate_candidate(payload, request.visible_inputs, allowed,
-                                       seed=contract.experiment["seed"], qa_id=request.request_id)
-                except ValueError:
-                    invalid = True
-                invalid |= set(payload["target_labels"]) != set(labels)
-            if invalid:
-                category = "semantic"
-                retry_limit = 0
-        if category:
-            state.finish(job_id, lease, error={"category": category, "response": asdict(response)}, retry_limit=retry_limit)
-            continue
-        result = {
-            "is_mock": response.is_mock, "job_id": job_id, "input_hash": input_hash,
-            "payload": payload, "content_hash": canonical_hash(payload), "response": asdict(response),
-            "created_at": datetime.now(timezone.utc).isoformat(),
-        }
-        state.finish(job_id, lease, result=result)
-        return result, False
+        try:
+            with state.keep_lease(job_id, lease, settings["lease_seconds"], settings["heartbeat_seconds"]):
+                response = client.generate(request)
+                category = None
+                if response.technical_error:
+                    category = "technical"
+                    retry_limit = settings["technical_max_retries"]
+                elif not response.schema_valid:
+                    category = "format"
+                    retry_limit = settings["format_repair_max_attempts"]
+                    if request.stage in {"generate_qa", "review_qa"}:
+                        retry_limit = min(retry_limit, settings["qa_format_revision_max_attempts"])
+                elif request.stage == "generate_qa" and "skip_reason" in response.parsed_payload:
+                    payload = response.parsed_payload
+                else:
+                    payload = response.parsed_payload
+                    visible = {item["evidence_id"] for item in request.visible_inputs["evidence"]}
+                    suggested = payload.get("suggested_annotation")
+                    cites = set(payload["evidence_ids"])
+                    if suggested:
+                        cites.update(suggested["evidence_ids"])
+                    invalid = not cites <= visible
+                    annotation = payload if request.stage == "annotate" else suggested
+                    if annotation is not None and request.stage in {"annotate", "review_labels"}:
+                        invalid |= (request.stage == "annotate" or claim is not None) and annotation["target_claim"] != claim
+                        invalid |= annotation["applicability"] == "not_applicable" and request.task_id != "reality_plausibility"
+                    if request.stage == "generate_qa":
+                        try:
+                            allowed = {item["code"] for item in contract.labels["tasks"][request.task_id]["labels"]}
+                            validate_candidate(payload, request.visible_inputs, allowed,
+                                               seed=contract.experiment["seed"], qa_id=request.request_id)
+                        except ValueError:
+                            invalid = True
+                        invalid |= set(payload["target_labels"]) != set(labels)
+                    if invalid:
+                        category = "semantic"
+                        retry_limit = 0
+                if category:
+                    state.finish(job_id, lease, error={"category": category, "response": asdict(response)}, retry_limit=retry_limit)
+                    continue
+                result = {
+                    "is_mock": response.is_mock, "job_id": job_id, "input_hash": input_hash,
+                    "payload": payload, "content_hash": canonical_hash(payload), "response": asdict(response),
+                    "created_at": datetime.now(timezone.utc).isoformat(),
+                }
+                state.finish(job_id, lease, result=result)
+                return result, False
+        except LeaseLost as exc:
+            raise JobFailed(request, job_id, technical_error="lease_lost") from exc
 
 
 def _fixture_cases(by_type):
