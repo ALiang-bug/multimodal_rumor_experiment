@@ -7,11 +7,17 @@ import uuid
 from contextlib import closing, contextmanager
 from threading import Event, Thread
 
+from .validation import canonical_hash
+
 
 class LeaseLost(ValueError):
     pass
 
-from .validation import canonical_hash
+
+class LeaseBusy(ValueError):
+    def __init__(self, job_id):
+        super().__init__(f"Job already leased: {job_id}")
+        self.job_id = job_id
 
 
 class State:
@@ -89,36 +95,45 @@ class State:
             (job_id, state, time.time(), json.dumps(detail, ensure_ascii=False)),
         )
 
-    def claim(self, stage, subject, task, input_hash, dependencies, lease_seconds):
+    def _register_job(self, stage, subject, task, input_hash, dependencies):
         dependencies = sorted(set(dependencies))
         job_id = canonical_hash([stage, subject, task, input_hash, dependencies])
+        for record_id, digest in dependencies:
+            retired = self.db.execute(
+                "SELECT 1 FROM invalidated_versions WHERE record_id = ? AND content_hash = ?",
+                (record_id, digest),
+            ).fetchone()
+            if retired:
+                raise ValueError(f"Stale dependency: {record_id} at {digest}")
+        if self.db.execute("SELECT 1 FROM jobs WHERE id = ?", (job_id,)).fetchone():
+            return job_id, False
+        self.db.execute(
+            """INSERT INTO jobs(id, stage, subject, task, input_hash, state)
+               VALUES (?, ?, ?, ?, ?, 'QUEUED')""", (job_id, stage, subject, task, input_hash),
+        )
+        self._event(job_id, "QUEUED", {})
+        self.db.executemany(
+            "INSERT INTO dependencies VALUES (?, ?, ?)",
+            [(job_id, record_id, digest) for record_id, digest in dependencies],
+        )
+        return job_id, True
+
+    def register_jobs(self, jobs):
         with self.db:
             self.db.execute("BEGIN IMMEDIATE")
-            for record_id, digest in dependencies:
-                retired = self.db.execute(
-                    "SELECT 1 FROM invalidated_versions WHERE record_id = ? AND content_hash = ?",
-                    (record_id, digest),
-                ).fetchone()
-                if retired:
-                    raise ValueError(f"Stale dependency: {record_id} at {digest}")
-            created = self.db.execute(
-                """INSERT OR IGNORE INTO jobs(id, stage, subject, task, input_hash, state)
-                   VALUES (?, ?, ?, ?, ?, 'QUEUED')""",
-                (job_id, stage, subject, task, input_hash),
-            )
-            if created.rowcount:
-                self._event(job_id, "QUEUED", {})
-                self.db.executemany(
-                    "INSERT INTO dependencies VALUES (?, ?, ?)",
-                    [(job_id, record_id, digest) for record_id, digest in dependencies],
-                )
+            return sum(self._register_job(*job)[1] for job in jobs)
+
+    def claim(self, stage, subject, task, input_hash, dependencies, lease_seconds):
+        with self.db:
+            self.db.execute("BEGIN IMMEDIATE")
+            job_id, _ = self._register_job(stage, subject, task, input_hash, dependencies)
             job = self.db.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()
             if job["state"] == "SUCCEEDED":
                 return job_id, None, json.loads(job["result"])
             now = time.time()
             if job["state"] == "RUNNING":
                 if job["expires"] > now:
-                    raise ValueError(f"Job already leased: {job_id}")
+                    raise LeaseBusy(job_id)
                 if job["technical_retries"] >= 2:
                     self.db.execute("UPDATE jobs SET state = 'FAILED', lease = NULL, expires = NULL WHERE id = ?", (job_id,))
                     self._event(job_id, "FAILED", {"category": "technical", "reason": "lease expired"})

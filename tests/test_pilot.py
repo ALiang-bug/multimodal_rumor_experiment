@@ -161,11 +161,50 @@ class AnnotateTests(PilotFixture, TestCase):
             group = self.command("annotate", workers=8, extra=offsets)
         self.assertEqual(group["failed"], 0)
         self.assertEqual(group["run_timings"]["prepared_requests"], 8)
+        self.assertEqual(group["run_timings"]["newly_registered"], 8)
         self.assertEqual([report["batch_id"] for report in group["batches"]], [f"{BATCH}-0", f"{BATCH}-1"])
+        model_ids = {row["job_id"] for report in group["batches"] for row in report["results"]
+                     if row["task_id"] in TASK_LABELS}
+        events = [row["state"] for row in self.state.db.execute("SELECT * FROM events ORDER BY sequence")
+                  if row["job_id"] in model_ids]
+        self.assertEqual(events[:8], ["QUEUED"] * 8)
 
         with self.transport(lambda _: self.fail("Cached batch must not generate again")):
             resumed = self.command("annotate", workers=8, extra=offsets)
+        self.assertEqual(resumed["run_timings"]["newly_registered"], 0)
         self.assertTrue(all(row["cached"] for report in resumed["batches"] for row in report["results"]))
+
+    def test_active_lease_does_not_cancel_queue_and_expiry_allows_resume(self):
+        registered = State.register_jobs
+        inherited = []
+
+        def register_with_active_lease(state, specs):
+            specs = list(specs)
+            count = registered(state, specs)
+            job, lease, _ = state.claim(*specs[0], 900)
+            inherited.append((job, lease))
+            return count
+
+        def reply(body):
+            properties = body["response_format"]["json_schema"]["schema"]["properties"]
+            sample = next(row for row in self.samples if row["target_claims"][0] == properties["target_claim"]["const"])
+            return self.payload(properties["task_id"]["const"], sample)
+
+        with self.transport(reply):
+            with patch.object(State, "register_jobs", new=register_with_active_lease):
+                first = self.command("annotate", workers=2, expected=1)
+            job, lease = inherited[0]
+            self.assertEqual(first["failed"], 1)
+            self.assertEqual(len(self.calls), 3)
+            self.assertEqual([(row["job_id"], row["technical_error"]) for row in first["results"]
+                              if row["status"] == "FAILED"], [(job, "lease_busy")])
+            row = self.state.db.execute("SELECT state, lease FROM jobs WHERE id = ?", (job,)).fetchone()
+            self.assertEqual(tuple(row), ("RUNNING", lease))
+            with self.state.db:
+                self.state.db.execute("UPDATE jobs SET expires = 0 WHERE id = ?", (job,))
+            resumed = self.command("annotate", workers=2)
+
+        self.assertEqual((resumed["manifest_id"], resumed["failed"], len(self.calls)), (first["manifest_id"], 0, 4))
 
     def test_lease_failure_isolated_and_resume_reuses_completed_results(self):
         original_finish = State.finish

@@ -11,7 +11,7 @@ from .provenance import run_source_tasks
 from .qa import solver_projection, validate_candidate
 from .requests import build_request
 from .records import mock_manifest, stage_record
-from .state import LeaseLost
+from .state import LeaseBusy, LeaseLost
 from .validation import canonical_hash
 
 
@@ -22,15 +22,20 @@ class JobFailed(ValueError):
         self.technical_error = technical_error
 
 
+def model_job_spec(request, subject, dependencies, script_hash):
+    return request.stage, subject, request.task_id, canonical_hash([request.request_id, script_hash]), dependencies
+
+
 def execute(state, contract, request, subject, dependencies, client, *, script_hash, claim=None, labels=None,
             prepared=None):
     settings = contract.experiment["runtime"]
-    input_hash = canonical_hash([request.request_id, script_hash])
+    spec = model_job_spec(request, subject, dependencies, script_hash)
+    input_hash = spec[3]
     while True:
-        job_id, lease, cached = state.claim(
-            request.stage, subject, request.task_id, input_hash,
-            dependencies, settings["lease_seconds"],
-        )
+        try:
+            job_id, lease, cached = state.claim(*spec, settings["lease_seconds"])
+        except LeaseBusy as exc:
+            raise JobFailed(request, exc.job_id, technical_error="lease_busy") from exc
         if cached is not None:
             return cached, True
         if lease is None:

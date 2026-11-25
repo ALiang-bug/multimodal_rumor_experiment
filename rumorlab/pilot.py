@@ -11,7 +11,7 @@ from time import monotonic
 
 from .grouping import apply_plan, freeze_plan
 from .m1 import connect_role, load_lock
-from .pipeline import JobFailed, execute
+from .pipeline import JobFailed, execute, model_job_spec
 from .provenance import prepare_source_tasks, save_source_tasks
 from .qa import solver_projection
 from .records import record_envelope, stage_record
@@ -102,12 +102,16 @@ def _save_record(state, contract, record):
         )
 
 
+def _model_dependencies(manifest, sample, available):
+    split = manifest["split_manifest_id"]
+    return [(sample["sample_id"], sample["content_hash"]), (split, split.removeprefix("split_")),
+            *((item["evidence_id"], item["content_hash"]) for item in available)]
+
+
 def _model_job(state, contract, client, manifest, stage, sample, claim, task, evidence, media_root, target, approvals,
                *, request=None, prepared=None):
-    dependencies = [(sample["sample_id"], sample["content_hash"]),
-                    (manifest["split_manifest_id"], manifest["split_manifest_id"].removeprefix("split_"))]
     available = [evidence[eid] for eid in sample["evidence_ids"]]
-    dependencies.extend((item["evidence_id"], item["content_hash"]) for item in available)
+    dependencies = _model_dependencies(manifest, sample, available)
     if request is None:
         request = build_request(contract, stage, task, sample, claim, available, media_root, upstream=target)
     if target is not None:
@@ -313,6 +317,14 @@ def annotate_batches(state, contract, run_id, batches, annotator_lock, reviewer_
             if _batch(state, run_id, batch_id)["manifest_id"] != manifest["run_id"]:
                 raise ValueError("Batch inputs changed. Use a new --batch-id")
 
+    queue_started = monotonic()
+    newly_registered = state.register_jobs(
+        model_job_spec(request, sample["sample_id"],
+                       _model_dependencies(manifest, sample, (evidence[eid] for eid in sample["evidence_ids"])),
+                       manifest["run_id"])
+        for manifest, sample, _, _, request, _ in jobs
+    )
+
     def run(worker_state, job):
         manifest, sample, claim, task, request, body = job
         return _model_job(worker_state, contract, client, manifest, "annotate", sample, claim, task,
@@ -340,8 +352,10 @@ def annotate_batches(state, contract, run_id, batches, annotator_lock, reviewer_
             _save_record(state, contract, record)
         results[manifest["run_id"]][:0] = source_results
     timings = {"samples": len(occupied), "prepared_requests": len(jobs),
+               "newly_registered": newly_registered,
                "prepared_wire_bytes": sum(len(job[-1]) for job in jobs),
-               "prepare_seconds": round(inference_started - started, 3),
+               "prepare_seconds": round(queue_started - started, 3),
+               "queue_seconds": round(inference_started - queue_started, 3),
                "model_seconds": round(inference_finished - inference_started, 3),
                "source_prepare_seconds": round(source_prepare_seconds, 3),
                "source_seconds": round(monotonic() - inference_finished, 3)}
