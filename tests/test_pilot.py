@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 import shutil
 from tempfile import TemporaryDirectory
-from threading import Barrier
+from threading import Barrier, Event
 from unittest import TestCase
 from unittest.mock import patch
 
@@ -16,6 +16,7 @@ from rumorlab.grouping import freeze_plan
 from rumorlab.ingest import import_snapshot
 from rumorlab.m1 import load_lock
 from rumorlab.mmfakebench import prepare_mmfakebench
+from rumorlab.provenance import prepare_source_tasks, save_source_tasks
 from rumorlab.qa import solver_projection
 from rumorlab.records import record_envelope, stage_record
 from rumorlab.requests import build_request
@@ -118,8 +119,9 @@ class PilotFixture:
 
 
 class AnnotateTests(PilotFixture, TestCase):
-    def test_prepares_one_queue_across_batches_before_starting_provenance(self):
+    def test_prepares_one_queue_and_overlaps_source_computation_without_source_writes(self):
         overlap = Barrier(8, timeout=5)
+        source_started, model_started = Event(), Event()
         prepared = []
         original_prepare = VllmModel.prepare
 
@@ -131,20 +133,31 @@ class AnnotateTests(PilotFixture, TestCase):
 
         def reply(body):
             self.assertEqual(len(prepared), 8)
+            model_started.set()
+            self.assertTrue(source_started.wait(5))
             overlap.wait()
             properties = body["response_format"]["json_schema"]["schema"]["properties"]
             sample = next(row for row in self.samples if row["target_claims"][0] == properties["target_claim"]["const"])
             return self.payload(properties["task_id"]["const"], sample)
 
-        from rumorlab.provenance import run_source_tasks
+        def prepare_sources(*args):
+            source_started.set()
+            self.assertTrue(model_started.wait(5))
+            return prepare_source_tasks(*args)
 
-        def sources(*args):
+        def save_sources(*args):
             self.assertEqual(len(self.calls), 8)
-            return run_source_tasks(*args)
+            count = args[0].db.execute("""
+                SELECT COUNT(*) FROM jobs WHERE state='SUCCEEDED'
+                AND task NOT IN ('text_reasoning', 'image_perception')
+            """).fetchone()[0]
+            self.assertEqual(count, 8)
+            return save_source_tasks(*args)
 
         offsets = ("--batch-offsets", "0", "1")
         with (self.transport(reply), patch.object(VllmModel, "prepare", new=prepare),
-              patch("rumorlab.pilot.run_source_tasks", new=sources)):
+              patch("rumorlab.pilot.prepare_source_tasks", new=prepare_sources),
+              patch("rumorlab.pilot.save_source_tasks", new=save_sources)):
             group = self.command("annotate", workers=8, extra=offsets)
         self.assertEqual(group["failed"], 0)
         self.assertEqual(group["run_timings"]["prepared_requests"], 8)

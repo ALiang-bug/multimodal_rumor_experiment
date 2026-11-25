@@ -12,7 +12,7 @@ from time import monotonic
 from .grouping import apply_plan, freeze_plan
 from .m1 import connect_role, load_lock
 from .pipeline import JobFailed, execute
-from .provenance import run_source_tasks
+from .provenance import prepare_source_tasks, save_source_tasks
 from .qa import solver_projection
 from .records import record_envelope, stage_record
 from .requests import build_request, visible_material
@@ -69,7 +69,7 @@ def _can_resume_revision(contract, pinned, current):
     if git("merge-base", "--is-ancestor", pinned, current).returncode:
         return False
     allowed = {"rumorlab/state.py", "rumorlab/pipeline.py", "rumorlab/pilot.py", "rumorlab/cli.py",
-               "rumorlab/requests.py", "rumorlab/vllm.py", "scripts/run_val100_baseline.sh"}
+               "rumorlab/requests.py", "rumorlab/vllm.py", "rumorlab/provenance.py", "scripts/run_val100_baseline.sh"}
     while current != pinned:
         metadata = git("log", "-1", "--format=%P%n%(trailers:key=Runtime-Resume-From,valueonly)", current)
         fields = metadata.stdout.split()
@@ -318,23 +318,33 @@ def annotate_batches(state, contract, run_id, batches, annotator_lock, reviewer_
         return _model_job(worker_state, contract, client, manifest, "annotate", sample, claim, task,
                           evidence, media_root, None, (), request=request, prepared=body)
 
+    def prepare_sources():
+        started = monotonic()
+        prepared = [list(prepare_source_tasks(contract, selected, evidence.values(), (split_id, plan_digest), manifest))
+                    for manifest, selected in selections]
+        return prepared, monotonic() - started
+
     inference_started = monotonic()
     results = {manifest["run_id"]: [] for manifest, _ in selections}
-    for job, result in zip(jobs, _dispatch_jobs(state, jobs, workers, run)):
-        results[job[0]["run_id"]].append(result)
-    source_started = monotonic()
-    for manifest, selected in selections:
+    with ThreadPoolExecutor(max_workers=1) as source_pool:
+        source_future = source_pool.submit(prepare_sources)
+        for job, result in zip(jobs, _dispatch_jobs(state, jobs, workers, run)):
+            results[job[0]["run_id"]].append(result)
+        inference_finished = monotonic()
+        source_jobs, source_prepare_seconds = source_future.result()
+
+    for (manifest, _), prepared in zip(selections, source_jobs):
         output = []
-        source_results = run_source_tasks(state, contract, selected, evidence.values(), (split_id, plan_digest),
-                                          manifest, output)
+        source_results = save_source_tasks(state, contract, manifest, prepared, output)
         for record in output:
             _save_record(state, contract, record)
         results[manifest["run_id"]][:0] = source_results
     timings = {"samples": len(occupied), "prepared_requests": len(jobs),
                "prepared_wire_bytes": sum(len(job[-1]) for job in jobs),
                "prepare_seconds": round(inference_started - started, 3),
-               "model_seconds": round(source_started - inference_started, 3),
-               "source_seconds": round(monotonic() - source_started, 3)}
+               "model_seconds": round(inference_finished - inference_started, 3),
+               "source_prepare_seconds": round(source_prepare_seconds, 3),
+               "source_seconds": round(monotonic() - inference_finished, 3)}
     return [_finish(state, manifest, "annotate", results[manifest["run_id"]], workers, started,
                     execution_revision=revision, timings=timings) for manifest, _ in selections]
 

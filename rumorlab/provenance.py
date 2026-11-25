@@ -34,9 +34,8 @@ def source_annotation(sample, claim, task, evidence):
     }
 
 
-def run_source_tasks(state, contract, samples, evidence, split_dependency, manifest, output):
+def prepare_source_tasks(contract, samples, evidence, split_dependency, manifest):
     evidence_hashes = {row["evidence_id"]: row["content_hash"] for row in evidence}
-    report = []
     for sample in samples:
         for claim in sample["target_claims"]:
             for task in contract.experiment["annotation"]["provenance_tasks"]:
@@ -48,29 +47,40 @@ def run_source_tasks(state, contract, samples, evidence, split_dependency, manif
                 if not sample["is_mock"]:
                     identity.append(manifest["run_id"])
                 input_hash = canonical_hash(identity)
-                job_id, lease, cached = state.claim(
-                    "annotate", sample["sample_id"], task, input_hash,
-                    deps, contract.experiment["runtime"]["lease_seconds"],
-                )
-                if cached is None:
-                    if lease is None:
-                        raise ValueError(f"Source annotation job is unavailable: {job_id}")
-                    state.finish(job_id, lease, result={
-                        "is_mock": sample["is_mock"], "producer": "manifest",
-                        "content_hash": canonical_hash(payload), "payload": payload,
-                    })
-                record = stage_record(
-                    {"payload": payload, "input_hash": input_hash, "job_id": job_id,
-                     "created_at": manifest["created_at"]}, sample,
-                    {"kind": "manifest", "role": "system", "model_id": None, "model_revision": None,
-                     "run_id": manifest["run_id"], "prompt_version": None, "prompt_hash": None},
-                    payload["evidence_ids"], kind="annotation",
-                )
-                record["label_schema_version"] = contract.labels["label_schema_version"]
-                output.append(record)
-                report.append({
-                    "stage": "annotate", "job_id": job_id, "sample_id": sample["sample_id"],
-                    "claim_id": claim["claim_id"], "task_id": task, "labels": payload["labels"],
-                    "producer": "manifest", "status": "VALIDATED", "cached": cached is not None,
-                })
+                yield sample, claim, task, payload, deps, input_hash
+
+
+def save_source_tasks(state, contract, manifest, prepared, output):
+    report = []
+    for sample, claim, task, payload, deps, input_hash in prepared:
+        job_id, lease, cached = state.claim(
+            "annotate", sample["sample_id"], task, input_hash,
+            deps, contract.experiment["runtime"]["lease_seconds"],
+        )
+        if cached is None:
+            if lease is None:
+                raise ValueError(f"Source annotation job is unavailable: {job_id}")
+            state.finish(job_id, lease, result={
+                "is_mock": sample["is_mock"], "producer": "manifest",
+                "content_hash": canonical_hash(payload), "payload": payload,
+            })
+        record = stage_record(
+            {"payload": payload, "input_hash": input_hash, "job_id": job_id,
+             "created_at": manifest["created_at"]}, sample,
+            {"kind": "manifest", "role": "system", "model_id": None, "model_revision": None,
+             "run_id": manifest["run_id"], "prompt_version": None, "prompt_hash": None},
+            payload["evidence_ids"], kind="annotation",
+        )
+        record["label_schema_version"] = contract.labels["label_schema_version"]
+        output.append(record)
+        report.append({
+            "stage": "annotate", "job_id": job_id, "sample_id": sample["sample_id"],
+            "claim_id": claim["claim_id"], "task_id": task, "labels": payload["labels"],
+            "producer": "manifest", "status": "VALIDATED", "cached": cached is not None,
+        })
     return report
+
+
+def run_source_tasks(state, contract, samples, evidence, split_dependency, manifest, output):
+    prepared = prepare_source_tasks(contract, samples, evidence, split_dependency, manifest)
+    return save_source_tasks(state, contract, manifest, prepared, output)
