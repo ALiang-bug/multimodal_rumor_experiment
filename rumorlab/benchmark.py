@@ -44,14 +44,16 @@ def _measure(client, requests, concurrency, seed):
     }
 
 
-def benchmark_annotator(contract, db_path, run_id, model_lock, levels):
+def benchmark_annotator(contract, db_path, run_id, model_lock, levels, *, sample_count):
     if not levels or len(set(levels)) != len(levels) or any(not 1 <= level <= 32 for level in levels):
         raise ValueError("--levels must contain distinct concurrency levels between 1 and 32")
     with closing(sqlite3.connect(db_path.resolve().as_uri() + "?mode=ro", uri=True)) as db:
         db.row_factory = sqlite3.Row
         row, _, _, samples, evidence = _inputs(db, run_id)
+    if not 1 <= sample_count <= len(samples):
+        raise ValueError(f"--samples must be between 1 and {len(samples)} for this val run")
     seed = contract.experiment["seed"]
-    sample_ids = sorted(samples, key=lambda sid: canonical_hash([seed, sid]))[:8]
+    sample_ids = sorted(samples, key=lambda sid: canonical_hash([seed, sid]))[:sample_count]
     tasks = contract.experiment["annotation"]["model_tasks"]
     requests = [build_request(contract, "annotate", task, sample, sample["target_claims"][0],
                               evidence.values(), Path(row["media_root"]))

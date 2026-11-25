@@ -18,7 +18,8 @@ class BenchmarkTests(PilotFixture, TestCase):
             return self.payload(properties["task_id"]["const"], sample)
 
         args = ["rumorlab", "benchmark-vllm", "--config", str(CONFIG), "--run-id", RUN,
-                "--state-db", str(self.db_path), "--model-lock", str(self.locks["annotator"]), "--levels", "1", "4"]
+                "--state-db", str(self.db_path), "--model-lock", str(self.locks["annotator"]),
+                "--samples", "2", "--levels", "1", "4"]
         output = StringIO()
         with self.transport(reply), patch("sys.argv", args), redirect_stdout(output), redirect_stderr(StringIO()):
             self.assertEqual(main(), 0)
@@ -34,3 +35,12 @@ class BenchmarkTests(PilotFixture, TestCase):
         self.assertTrue(all(call["seed"] == report["seed"] for call in self.calls))
         self.assertEqual(self.state.db.execute("SELECT COUNT(*) FROM jobs").fetchone()[0], 0)
         self.assertEqual(self.state.db.execute("SELECT COUNT(*) FROM pilot_records").fetchone()[0], 0)
+
+    def test_sample_size_cannot_silently_shrink(self):
+        args = ["rumorlab", "benchmark-vllm", "--config", str(CONFIG), "--run-id", RUN,
+                "--state-db", str(self.db_path), "--model-lock", str(self.locks["annotator"]), "--samples", "16"]
+        error = StringIO()
+        with patch("sys.argv", args), redirect_stderr(error), patch("rumorlab.benchmark.connect_role") as connect:
+            self.assertEqual(main(), 1)
+            connect.assert_not_called()
+        self.assertIn("--samples must be between 1 and 2", error.getvalue())

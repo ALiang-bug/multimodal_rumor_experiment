@@ -192,9 +192,9 @@ set -o pipefail
 mkdir -p runs/benchmark-qwen
 NO_PROXY=127.0.0.1,localhost no_proxy=127.0.0.1,localhost \
 ANNOTATOR_BASE_URL=http://127.0.0.1:8000/v1 \
-  python -m rumorlab benchmark-vllm --run-id mmfakebench-val-import-smoke-12 \
+  python -m rumorlab benchmark-vllm --run-id mmfakebench-val --samples 16 \
     --model-lock runs/m1-qwen/model_lock.json --levels 1 2 4 8 16 24 32 \
     | tee runs/benchmark-qwen/report.json
 ```
 
-每档重放同一组 32 个真实图文标注请求和相同种子。基准只读 SQLite，发出的请求都会实际执行，失败统计不包含重试。单档进度输出到终端，最终 JSON 记录成功请求每分钟、生成 token 每秒、延迟及失败数。`best_concurrency` 是零失败档位中完成合格请求最快的一档。结果适用于当前 Qwen 标注负载和服务设置。
+上面的命令从完整 val 导入批次固定选出 16 条样本，每档重放同一组 64 个真实图文标注请求和相同种子。`--samples` 默认 8，样本不足时会报错。基准只读 SQLite，发出的请求都会实际执行，失败统计不包含重试。单档进度输出到终端，最终 JSON 记录成功请求每分钟、生成 token 每秒、延迟及失败数。`best_concurrency` 是零失败档位中完成合格请求最快的一档。结果适用于当前 Qwen 标注负载和服务设置。
