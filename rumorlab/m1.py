@@ -76,13 +76,14 @@ def load_lock(contract, role, lock_path):
     return lock, _sha(lock_data)
 
 
-def connect_role(contract, role):
+def connect_role(contract, role, *, timeout=None):
     settings = contract.models["models"][role]
     endpoint = os.environ.get(settings["endpoint_env"])
     if not endpoint:
         raise ValueError(f"Set {settings['endpoint_env']} to the deployed model's /v1 endpoint")
-    client = VllmModel(settings, endpoint, os.environ.get(settings["token_env"]),
-                       contract.models["response_contract"]["timeout_seconds"])
+    if timeout is None:
+        timeout = contract.models["response_contract"]["timeout_seconds"]
+    client = VllmModel(settings, endpoint, os.environ.get(settings["token_env"]), timeout)
     client.verify_identity()
     return client
 

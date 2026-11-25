@@ -18,7 +18,8 @@ from .validation import canonical_hash
 
 
 def _measure(client, requests, concurrency, seed):
-    def send(request):
+    def send(item):
+        _, request = item
         result, _ = client.complete(request, seed=seed)
         if not result.schema_valid:
             return result, result.technical_error or f"invalid_response:{result.finish_reason}"
@@ -34,9 +35,16 @@ def _measure(client, requests, concurrency, seed):
     valid = [result for result, error in results if error is None]
     latency = sorted(result.latency_ms for result in valid)
     tokens = sum(result.usage.get("completion_tokens") or 0 for result in valid)
+    failed_requests = [
+        {"position": position, "sample_id": sample_id, "task_id": request.task_id,
+         "request_id": request.request_id, "error": error, "latency_ms": result.latency_ms}
+        for position, ((sample_id, request), (result, error)) in enumerate(zip(requests, results), start=1)
+        if error is not None
+    ]
     return {
         "concurrency": concurrency, "attempted": len(results), "succeeded": len(valid),
         "failed": len(results) - len(valid), "errors": dict(failures), "elapsed_seconds": elapsed,
+        "failed_requests": failed_requests,
         "successful_requests_per_minute": 60 * len(valid) / elapsed,
         "completion_tokens_per_second": tokens / elapsed,
         "latency_p50_ms": median(latency) if latency else None,
@@ -44,9 +52,11 @@ def _measure(client, requests, concurrency, seed):
     }
 
 
-def benchmark_annotator(contract, db_path, run_id, model_lock, levels, *, sample_count):
-    if not levels or len(set(levels)) != len(levels) or any(not 1 <= level <= 32 for level in levels):
-        raise ValueError("--levels must contain distinct concurrency levels between 1 and 32")
+def benchmark_annotator(contract, db_path, run_id, model_lock, levels, *, sample_count, repeats=1, timeout=None):
+    if not levels or len(set(levels)) != len(levels) or any(not 1 <= level <= 128 for level in levels):
+        raise ValueError("--levels must contain distinct concurrency levels between 1 and 128")
+    if repeats < 1 or (timeout is not None and timeout < 1):
+        raise ValueError("--repeats and --timeout-seconds must be positive")
     with closing(sqlite3.connect(db_path.resolve().as_uri() + "?mode=ro", uri=True)) as db:
         db.row_factory = sqlite3.Row
         row, _, _, samples, evidence = _inputs(db, run_id)
@@ -55,18 +65,19 @@ def benchmark_annotator(contract, db_path, run_id, model_lock, levels, *, sample
     seed = contract.experiment["seed"]
     sample_ids = sorted(samples, key=lambda sid: canonical_hash([seed, sid]))[:sample_count]
     tasks = contract.experiment["annotation"]["model_tasks"]
-    requests = [build_request(contract, "annotate", task, sample, sample["target_claims"][0],
-                              evidence.values(), Path(row["media_root"]))
-                for sample in (samples[sid] for sid in sample_ids) for task in tasks]
-    if max(levels) > len(requests):
+    request_count = sample_count * len(tasks) * repeats
+    if max(levels) > request_count:
         raise ValueError("The val run does not contain enough fixed requests for the requested concurrency")
-    total_calls = len(levels) * len(requests) + len(tasks)
+    total_calls = len(levels) * request_count + len(tasks)
     runtime = contract.experiment["runtime"]
     budget = contract.models["models"]["annotator"]["generation"]["max_output_tokens"]
     if total_calls > runtime["max_calls_per_run"] or total_calls * budget > runtime["max_generated_tokens_per_run"]:
         raise ValueError("Benchmark exceeds the configured request budget")
     lock, lock_digest = load_lock(contract, "annotator", model_lock)
-    client = connect_role(contract, "annotator")
+    requests = [(sid, build_request(contract, "annotate", task, samples[sid], samples[sid]["target_claims"][0],
+                                    evidence.values(), Path(row["media_root"])))
+                for sid in sample_ids for task in tasks] * repeats
+    client = connect_role(contract, "annotator", timeout=timeout)
     warmup = _measure(client, requests[:len(tasks)], min(4, max(levels)), seed)
     if warmup["failed"]:
         raise ValueError(f"Benchmark warm-up failed: {json.dumps(warmup['errors'])}")
@@ -75,13 +86,15 @@ def benchmark_annotator(contract, db_path, run_id, model_lock, levels, *, sample
         print(f"Benchmark concurrency={level}, requests={len(requests)}", file=sys.stderr, flush=True)
         measured = _measure(client, requests, level, seed)
         results.append(measured)
-        print(json.dumps(measured), file=sys.stderr, flush=True)
+        print(json.dumps({key: value for key, value in measured.items() if key != "failed_requests"}),
+              file=sys.stderr, flush=True)
     winner = max((result for result in results if not result["failed"]),
                  key=lambda result: (result["successful_requests_per_minute"], -result["concurrency"]), default=None)
     return {
         "model_id": lock["model_id"], "model_revision": lock["revision"], "model_lock_sha256": lock_digest,
         "run_id": run_id, "seed": seed, "sample_ids": sample_ids,
-        "workload_sha256": canonical_hash([seed, [request.request_id for request in requests]]),
+        "workload_sha256": canonical_hash([seed, [request.request_id for _, request in requests]]),
+        "timeout_seconds": client.timeout, "repeats": repeats, "requests_per_level": request_count,
         "warmup_requests": warmup["attempted"], "results": results,
         "best_concurrency": winner["concurrency"] if winner is not None else None,
     }

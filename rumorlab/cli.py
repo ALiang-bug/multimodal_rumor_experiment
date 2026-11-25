@@ -85,6 +85,8 @@ def main():
     benchmark.add_argument("--state-db", type=Path)
     benchmark.add_argument("--model-lock", required=True, type=Path)
     benchmark.add_argument("--samples", type=int, default=8, help="Number of distinct val samples (default: 8)")
+    benchmark.add_argument("--repeats", type=int, default=1, help="Replays of the fixed request set per level")
+    benchmark.add_argument("--timeout-seconds", type=int, help="Override request timeout for this benchmark only")
     benchmark.add_argument("--levels", type=int, nargs="+", default=[1, 2, 4, 8, 16, 24, 32])
     invalidate = commands.add_parser("invalidate", help="Retire a version and invalidate its downstream jobs")
     invalidate.add_argument("--record-id", required=True)
@@ -122,7 +124,7 @@ def main():
             if not path.is_file():
                 raise ValueError(f"Imported val state database not found: {path}")
             report = benchmark_annotator(contract, path, args.run_id, args.model_lock, args.levels,
-                                         sample_count=args.samples)
+                                         sample_count=args.samples, repeats=args.repeats, timeout=args.timeout_seconds)
             print(json.dumps(report, ensure_ascii=False))
             return 1 if report["best_concurrency"] is None else 0
         if args.command in {"annotate", "review-labels", "generate-qa", "review-qa"}:
