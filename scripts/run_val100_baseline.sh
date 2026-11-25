@@ -15,48 +15,32 @@ output=runs/m2-val100-baseline
 mkdir -p "$output"
 exit_status=0
 
+combined="$output/$stage-combined.json"
+pending=$(mktemp "$combined.XXXXXX")
+trap 'rm -f -- "$pending"' EXIT
+args=("$stage" --run-id mmfakebench-val --batch-id m2-val100-baseline --batch-offsets 0 25 50 75
+      --reviewer-lock runs/m1-gemma/model_lock.json)
 if [[ "$stage" == annotate ]]; then
-  combined="$output/annotate-combined.json"
-  echo "Preparing all 100 val samples for one inference queue"
-  python -m rumorlab annotate --run-id mmfakebench-val \
-    --batch-id m2-val100-baseline --batch-offsets 0 25 50 75 --limit 25 \
-    --annotator-lock runs/m1-qwen/model_lock.json --reviewer-lock runs/m1-gemma/model_lock.json \
-    > "$combined" || exit_status=$?
-  if [[ ! -s "$combined" ]]; then
-    exit "$exit_status"
-  fi
-  python - "$output" <<'PY'
+  args+=(--limit 25 --annotator-lock runs/m1-qwen/model_lock.json)
+fi
+echo "Running $stage across four val batches in one inference queue"
+python -m rumorlab "${args[@]}" > "$pending" || exit_status=$?
+if [[ ! -s "$pending" ]]; then
+  exit "$exit_status"
+fi
+python - "$output" "$stage" "$pending" <<'PY'
 import json
 from pathlib import Path
 import sys
 
-output = Path(sys.argv[1])
-combined = json.loads((output / "annotate-combined.json").read_text(encoding="utf-8"))
+output, stage, pending = Path(sys.argv[1]), sys.argv[2], Path(sys.argv[3])
+combined = json.loads(pending.read_text(encoding="utf-8"))
+pending.replace(output / f"{stage}-combined.json")
 print(combined["run_timings"])
 for report in combined["batches"]:
     offset = report["batch_id"].rsplit("-", 1)[1]
-    (output / f"annotate-{offset}.json").write_text(json.dumps(report, ensure_ascii=False), encoding="utf-8")
-    print(report["batch_id"], {key: report[key] for key in ("samples", "workers", "failed")})
+    (output / f"{stage}-{offset}.json").write_text(json.dumps(report, ensure_ascii=False), encoding="utf-8")
+    print(report["batch_id"], {key: report[key] for key in ("samples", "workers", "failed", "elapsed_seconds")})
 PY
-  exit "$exit_status"
-fi
-
-for offset in 0 25 50 75; do
-  batch_id="m2-val100-baseline-$offset"
-  report="$output/$stage-$offset.json"
-  args=("$stage" --run-id mmfakebench-val --batch-id "$batch_id"
-        --reviewer-lock runs/m1-gemma/model_lock.json)
-  echo "Running $stage for $batch_id"
-  if python -m rumorlab "${args[@]}" > "$report"; then
-    :
-  else
-    status=$?
-    if [[ "$status" != 1 || ! -s "$report" ]]; then
-      exit "$status"
-    fi
-    exit_status=1
-  fi
-  python -c 'import json, sys; r = json.load(open(sys.argv[1], encoding="utf-8")); print({k: r[k] for k in ("samples", "workers", "failed", "elapsed_seconds")})' "$report"
-done
 
 exit "$exit_status"

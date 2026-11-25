@@ -322,7 +322,7 @@ class AnnotateTests(PilotFixture, TestCase):
 
 
 class LabelFixture(PilotFixture):
-    def seed_annotations(self, *tasks):
+    def seed_annotations(self, *tasks, batch=BATCH, start=1):
         digest, _ = freeze_plan(self.state, RUN, self.samples, self.contract.experiment["splitting"])
         models, hashes = {}, {}
         for role, path in self.locks.items():
@@ -333,18 +333,18 @@ class LabelFixture(PilotFixture):
             )}
             models[role].update(backend="vllm", thinking_enabled=True)
         data = {
-            "run_id": "pilot_seed", "mode": "real", "code_revision": REVISION,
+            "run_id": "pilot_seed" if batch == BATCH else batch, "mode": "real", "code_revision": REVISION,
             "config_hash": self.contract.config_hash, "label_schema_version": self.contract.labels["label_schema_version"],
             "dataset_version": self.sample["source"]["dataset_version"], "evidence_version": "none",
             "split_manifest_id": "split_" + digest, "models": models, "seed": 42, "status": "RUNNING",
             "prompt_versions": {stage: self.contract.experiment["annotation"]["prompt_version"]
                                 for stage in ("annotate", "review_labels")},
-            "runtime": {"source_run_id": RUN, "batch_id": BATCH, "sample_count": 1,
+            "runtime": {"source_run_id": RUN, "batch_id": batch, "sample_count": 1,
                         **{f"{role}_lock_sha256": digest for role, digest in hashes.items()}},
         }
         manifest = {**record_envelope("run_manifest", data, digest, is_mock=False), **data}
         records = []
-        for index, task in enumerate(tasks or ("image_text_consistency",), start=1):
+        for index, task in enumerate(tasks or ("image_text_consistency",), start=start):
             record = stage_record(
                 {"job_id": f"{index:064x}", "input_hash": f"{index:064x}", "payload": self.payload(task)},
                 self.sample, {"kind": "model", "role": "annotator", "model_id": models["annotator"]["model_id"],
@@ -357,7 +357,7 @@ class LabelFixture(PilotFixture):
         with self.state.db:
             self.state.db.execute(
                 "INSERT INTO pilot_batches VALUES (?, ?, ?, ?, ?, NULL)",
-                (RUN, BATCH, manifest["run_id"], json.dumps(manifest), json.dumps({
+                (RUN, batch, manifest["run_id"], json.dumps(manifest), json.dumps({
                     "failed": 0, "results": [{"status": "VALIDATED", "record_id": row["annotation_id"]} for row in records],
                 })),
             )
@@ -369,6 +369,60 @@ class LabelFixture(PilotFixture):
 
 
 class ReviewTests(LabelFixture, TestCase):
+    def test_prepares_and_registers_four_review_batches_before_shared_dispatch(self):
+        offsets = ("0", "25", "50", "75")
+        batch_ids = [f"{BATCH}-{offset}" for offset in offsets]
+        candidates = [self.seed_annotations(task, batch=batch_id, start=index)[0]
+                      for index, (batch_id, task) in enumerate(zip(batch_ids, TASK_LABELS), start=1)]
+        row = self.state.db.execute("SELECT annotate_report FROM pilot_batches WHERE batch_id = ?",
+                                    (batch_ids[-1],)).fetchone()
+        annotate_report = json.loads(row["annotate_report"])
+        annotate_report["results"].append({"status": "FAILED", "technical_error": "TimeoutError"})
+        with self.state.db:
+            self.state.db.execute("UPDATE pilot_batches SET annotate_report = ? WHERE batch_id = ?",
+                                  (json.dumps(annotate_report), batch_ids[-1]))
+        prepared = []
+        prepare = VllmModel.prepare
+        overlap = Barrier(4, timeout=5)
+
+        def prepare_request(client, request):
+            prepared.append(request.request_id)
+            return prepare(client, request)
+
+        def reply(body):
+            self.assertEqual(len(prepared), 4)
+            self.assertEqual(body["messages"][-1]["content"][0]["type"], "image_url")
+            overlap.wait()
+            return PASS_REVIEW
+
+        args = ("--batch-offsets", *offsets)
+        with self.transport(reply), patch.object(VllmModel, "prepare", new=prepare_request):
+            report = self.command("review-labels", extra=args)
+        self.assertEqual((report["failed"], len(self.calls)), (0, 4))
+        self.assertEqual(report["run_timings"]["prepared_requests"], 4)
+        self.assertEqual(report["run_timings"]["newly_registered"], 4)
+        self.assertEqual([item["batch_id"] for item in report["batches"]], batch_ids)
+        self.assertTrue(all(item["workers"] == 48 and len(item["results"]) == 1 for item in report["batches"]))
+        events = [row["state"] for row in self.state.db.execute("SELECT state FROM events ORDER BY sequence")]
+        self.assertEqual(events[:4], ["QUEUED"] * 4)
+        reviews = [row for row in self.export() if row["record_type"] == "review"]
+        self.assertEqual({(row["target_id"], row["target_content_hash"]) for row in reviews},
+                         {(row["annotation_id"], row["content_hash"]) for row in candidates})
+
+        with self.transport(lambda _: self.fail("Completed review must reuse the saved result")):
+            resumed = self.command("review-labels", extra=args)
+            single = self.command("review-labels", batch=batch_ids[0])
+        self.assertEqual(resumed["run_timings"]["newly_registered"], 0)
+        self.assertTrue(all(item["results"][0]["cached"] for item in resumed["batches"]))
+        self.assertEqual(single["results"][0], resumed["batches"][0]["results"][0])
+
+    def test_missing_review_batch_fails_before_model_connection(self):
+        self.seed_annotations(batch=f"{BATCH}-0")
+        with patch("rumorlab.pilot.connect_role") as connect:
+            error = self.command("review-labels", extra=("--batch-offsets", "0", "25"), expected=1)
+        self.assertIn(f"Finish annotate for batch {BATCH}-25", error)
+        connect.assert_not_called()
+
     def test_reviews_saved_candidate_and_projects_silver_without_rewriting_it(self):
         candidate, = self.seed_annotations()
 

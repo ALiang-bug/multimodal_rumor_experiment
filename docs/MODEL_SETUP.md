@@ -86,7 +86,7 @@ export GEMMA_SNAPSHOT="$MODELS_DIR/models--google--gemma-4-31B-it/snapshots/${GE
 ```bash
 vllm serve "$QWEN_SNAPSHOT" --served-model-name Qwen/Qwen3.8-27B \
   --host 127.0.0.1 --port 8000 --tensor-parallel-size 1 --dtype bfloat16 \
-  --max-model-len 12288 --max-num-seqs 32 --gpu-memory-utilization 0.92 \
+  --max-model-len 12288 --max-num-seqs 64 --gpu-memory-utilization 0.92 \
   --limit-mm-per-prompt '{"image":2}' --reasoning-parser qwen3 \
   2>&1 | tee runs/m1-qwen/server.log
 ```
@@ -106,7 +106,7 @@ python -m rumorlab preflight --mode real --role annotator \
 ```bash
 vllm serve "$GEMMA_SNAPSHOT" --served-model-name google/gemma-4-31B-it \
   --host 127.0.0.1 --port 8000 --tensor-parallel-size 1 --dtype bfloat16 \
-  --max-model-len 12288 --max-num-seqs 32 --gpu-memory-utilization 0.92 \
+  --max-model-len 12288 --max-num-seqs 64 --gpu-memory-utilization 0.92 \
   --limit-mm-per-prompt '{"image":2}' --reasoning-parser gemma4 \
   2>&1 | tee runs/m1-gemma/server.log
 ```
@@ -149,13 +149,15 @@ REVIEWER_BASE_URL=http://127.0.0.1:8000/v1 \
 
 Reviewer 只读取同一批次持久化且通过验证的模型候选。PASS 对原候选投影 silver，NEEDS_HUMAN 和 REJECT 分别投影待人工和排除。更改代码、锁或输入后使用新的 `--batch-id`。两阶段均只接受 MMFakeBench val。vLLM 解码使用结构和任务枚举约束，完整的条件式 Schema 保留在 Prompt 和本地校验中。
 
-标注、标签审核、QA 生成和 QA 审核的客户端默认并发 48 条。服务端并发上限由对应的 vLLM 启动参数决定，单卡依次加载两个角色。报告中的 `workers` 为本次客户端并发上限，`elapsed_seconds` 为阶段耗时。同一批次重跑可以通过 `--workers` 调整并发，已完成任务复用缓存。
+标注、标签审核、QA 生成和 QA 审核默认使用 48 路客户端并发，vLLM 的默认启动上限为 `--max-num-seqs 64`。单卡依次加载两个角色。报告中的 `workers` 为本次客户端并发上限，`elapsed_seconds` 为阶段耗时。同一批次重跑可以通过 `--workers` 调整并发，已完成任务复用缓存。
 
 用 `python -m rumorlab export-snapshot --run-id mmfakebench-val-import-smoke-12` 导出源样本及该导入批次的当前标注与审核记录。
 
 ### 100 条 val 标签基线
 
-在项目目录和已激活的 `rumorlab-m1` 环境中，先启动 Qwen 并执行 `bash scripts/run_val100_baseline.sh annotate`。再切换到 Gemma，在同一提交和状态库上执行 `bash scripts/run_val100_baseline.sh review-labels`。两个阶段都使用默认 48 并发。脚本对 `mmfakebench-val` 的固定顺序使用偏移 0、25、50、75，每次取 25 条，共 100 条互不重叠的 dev 样本。
+在项目目录和已激活的 `rumorlab-m1` 环境中，先启动 Qwen 并执行 `bash scripts/run_val100_baseline.sh annotate`。再切换到 Gemma，沿用原状态库执行 `bash scripts/run_val100_baseline.sh review-labels`。脚本使用 `mmfakebench-val` 的四个批次，偏移为 0、25、50、75，每批 25 条。标注和标签审核各使用一个 48 路请求池，Gemma 启动上限为 64。
+
+标签审核先为四批已验证的候选准备请求，统一在 SQLite 登记后开始派发。`review-labels-combined.json` 记录准备、登记和推理用时，`review-labels-{0,25,50,75}.json` 保留各批结果。已完成审核可按原任务 ID 复用，初标失败项保留在标注报告中。
 
 独立阶段报告保存在 `runs/m2-val100-baseline/`。单个模型任务失败会写入报告，脚本继续处理后续批次并最终返回非零。端点或配置错误会立即中止。重跑同一阶段可以复用已有有效结果。Gemma 审核已验证的候选。用 `python -m rumorlab export-snapshot --run-id mmfakebench-val > runs/m2-val100-baseline/snapshot.jsonl` 导出完整 val 快照，再按阶段报告的 `manifest_id` 匹配 `producer.run_id`，定位本轮标注与审核记录。质量排查应核对具体输入、标签、理由和引用，以及 Reviewer 的决定与理由，再据此修改 Prompt。
 
@@ -191,7 +193,7 @@ REVIEWER_BASE_URL=http://127.0.0.1:8000/v1 \
 
 ## Qwen 并发基准
 
-在独占服务上按上文 Qwen 命令启动，保持 `--max-num-seqs 32`，另加 `--no-enable-prefix-caching --mm-processor-cache-gb 0`。固定请求会跨档位重复发送，这两个开关使缓存热度不成为对照变量。在项目根目录及已激活的环境中执行：
+在独占服务上按上文 Qwen 命令启动，将本次基准的 `--max-num-seqs` 设为 `32`，另加 `--no-enable-prefix-caching --mm-processor-cache-gb 0`。固定请求会跨档位重复发送，这两个开关使缓存热度不成为对照变量。在项目根目录及已激活的环境中执行：
 
 ```bash
 set -o pipefail

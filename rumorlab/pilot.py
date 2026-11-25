@@ -102,22 +102,23 @@ def _save_record(state, contract, record):
         )
 
 
-def _model_dependencies(manifest, sample, available):
+def _model_dependencies(manifest, sample, available, target=None, approvals=()):
     split = manifest["split_manifest_id"]
-    return [(sample["sample_id"], sample["content_hash"]), (split, split.removeprefix("split_")),
-            *((item["evidence_id"], item["content_hash"]) for item in available)]
+    dependencies = [(sample["sample_id"], sample["content_hash"]), (split, split.removeprefix("split_")),
+                    *((item["evidence_id"], item["content_hash"]) for item in available)]
+    if target is not None:
+        dependencies.extend(_record_dependencies(target))
+    for approval in approvals:
+        dependencies.extend(_record_dependencies(approval))
+    return dependencies
 
 
 def _model_job(state, contract, client, manifest, stage, sample, claim, task, evidence, media_root, target, approvals,
                *, request=None, prepared=None):
     available = [evidence[eid] for eid in sample["evidence_ids"]]
-    dependencies = _model_dependencies(manifest, sample, available)
+    dependencies = _model_dependencies(manifest, sample, available, target, approvals)
     if request is None:
         request = build_request(contract, stage, task, sample, claim, available, media_root, upstream=target)
-    if target is not None:
-        dependencies.extend(_record_dependencies(target))
-    for approval in approvals:
-        dependencies.extend(_record_dependencies(approval))
     if stage == "review_qa" and solver_projection(request, sample) != target["solver_input"]:
         raise ValueError("QA solver input changed since generation")
     report = {"sample_id": sample["sample_id"], "claim_id": claim["claim_id"], "task_id": task}
@@ -364,35 +365,77 @@ def annotate_batches(state, contract, run_id, batches, annotator_lock, reviewer_
 
 
 def review_labels(state, contract, run_id, batch_id, reviewer_lock, *, workers=1):
+    return review_label_batches(state, contract, run_id, [batch_id], reviewer_lock, workers=workers)[0]
+
+
+def review_label_batches(state, contract, run_id, batch_ids, reviewer_lock, *, workers):
     started = monotonic()
-    batch = _batch(state, run_id, batch_id)
-    if batch is None or batch["annotate_report"] is None:
-        raise ValueError("Finish annotate for this --run-id and --batch-id before reviewing")
-    manifest = json.loads(batch["manifest"])
-    _, lock_hash = load_lock(contract, "reviewer", reviewer_lock)
-    if lock_hash != manifest["runtime"]["reviewer_lock_sha256"]:
-        raise ValueError("Reviewer model lock differs from the annotated batch")
-    execution_revision = _code_revision(contract)
-    if manifest["config_hash"] != contract.config_hash or not _can_resume_revision(
-        contract, manifest["code_revision"], execution_revision
-    ):
-        raise ValueError("Use the same code and configuration as the annotated batch")
+    if len(set(batch_ids)) != len(batch_ids):
+        raise ValueError("Review batch IDs must be distinct")
     row, _, _, samples, evidence = _inputs(state.db, run_id)
-    ids = [item["record_id"] for item in json.loads(batch["annotate_report"])["results"]
-           if item.get("record_id") and item["status"] == "VALIDATED"]
-    if not ids:
+    _, lock_hash = load_lock(contract, "reviewer", reviewer_lock)
+    execution_revision = _code_revision(contract)
+    selections = []
+    for batch_id in batch_ids:
+        batch = _batch(state, run_id, batch_id)
+        if batch is None or batch["annotate_report"] is None:
+            raise ValueError(f"Finish annotate for batch {batch_id} before reviewing")
+        manifest = json.loads(batch["manifest"])
+        if lock_hash != manifest["runtime"]["reviewer_lock_sha256"]:
+            raise ValueError("Reviewer model lock differs from the annotated batch")
+        if manifest["config_hash"] != contract.config_hash or not _can_resume_revision(
+            contract, manifest["code_revision"], execution_revision
+        ):
+            raise ValueError("Use the same code and configuration as the annotated batch")
+        ids = [item["record_id"] for item in json.loads(batch["annotate_report"])["results"]
+               if item.get("record_id") and item["status"] == "VALIDATED"]
+        _check_budget(contract, "reviewer", len(ids))
+        selections.append((manifest, ids))
+    if not any(ids for _, ids in selections):
         raise ValueError("No validated model annotations available for review")
-    _check_budget(contract, "reviewer", len(ids))
+
     client = connect_role(contract, "reviewer")
+    media_root = Path(row["media_root"])
     jobs = []
-    for record_id in ids:
-        record = state.db.execute("SELECT record FROM pilot_records WHERE record_id = ?", (record_id,)).fetchone()
-        target = json.loads(record["record"])
-        claim, task = target["payload"]["target_claim"], target["payload"]["task_id"]
-        jobs.append((samples[target["sample_id"]], claim, task, target, ()))
-    results = _run_model_jobs(state, contract, client, manifest, "review_labels", evidence,
-                              Path(row["media_root"]), jobs, workers)
-    return _finish(state, manifest, "review_labels", results, workers, started, execution_revision=execution_revision)
+    for manifest, ids in selections:
+        sample = None
+        for record_id in ids:
+            record = state.db.execute("SELECT record FROM pilot_records WHERE record_id = ?", (record_id,)).fetchone()
+            target = json.loads(record["record"])
+            current_sample = samples[target["sample_id"]]
+            if current_sample is not sample:
+                sample = current_sample
+                available = [evidence[eid] for eid in sample["evidence_ids"]]
+                material = visible_material(sample, available, media_root, solver=False)
+            claim, task = target["payload"]["target_claim"], target["payload"]["task_id"]
+            request = build_request(contract, "review_labels", task, sample, claim, available, media_root,
+                                    upstream=target, material=material)
+            jobs.append((manifest, sample, claim, task, target, replace(request, images=()), client.prepare(request)))
+
+    queue_started = monotonic()
+    newly_registered = state.register_jobs(
+        model_job_spec(request, sample["sample_id"],
+                       _model_dependencies(manifest, sample, (evidence[eid] for eid in sample["evidence_ids"]), target),
+                       manifest["run_id"])
+        for manifest, sample, _, _, target, request, _ in jobs
+    )
+
+    def run(worker_state, job):
+        manifest, sample, claim, task, target, request, body = job
+        return _model_job(worker_state, contract, client, manifest, "review_labels", sample, claim, task,
+                          evidence, media_root, target, (), request=request, prepared=body)
+
+    inference_started = monotonic()
+    results = {manifest["run_id"]: [] for manifest, _ in selections}
+    for job, result in zip(jobs, _dispatch_jobs(state, jobs, workers, run)):
+        results[job[0]["run_id"]].append(result)
+    timings = {"prepared_requests": len(jobs), "newly_registered": newly_registered,
+               "prepared_wire_bytes": sum(len(job[-1]) for job in jobs),
+               "prepare_seconds": round(queue_started - started, 3),
+               "queue_seconds": round(inference_started - queue_started, 3),
+               "model_seconds": round(monotonic() - inference_started, 3)}
+    return [_finish(state, manifest, "review_labels", results[manifest["run_id"]], workers, started,
+                    execution_revision=execution_revision, timings=timings) for manifest, _ in selections]
 
 
 def generate_qa(state, contract, run_id, batch_id, label_batch_id, limit, annotator_lock, reviewer_lock,

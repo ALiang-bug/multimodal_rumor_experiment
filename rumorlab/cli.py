@@ -69,6 +69,8 @@ def main():
     annotate.add_argument("--batch-offsets", type=int, nargs="+",
                           help="Share one inference queue across batches named <batch-id>-<offset>; --limit applies per batch")
     review_labels = commands.add_parser("review-labels", help="Review the saved annotations of a val batch")
+    review_labels.add_argument("--batch-offsets", type=int, nargs="+",
+                               help="Share one inference queue across saved batches named <batch-id>-<offset>")
     generate_qa = commands.add_parser("generate-qa", help="Generate QA from accepted val annotations")
     review_qa = commands.add_parser("review-qa", help="Review the saved QA candidates of a val batch")
     for command in (annotate, review_labels, generate_qa, review_qa):
@@ -154,7 +156,14 @@ def main():
                                   "run_timings": reports[0]["run_timings"],
                                   "failed": sum(item["failed"] for item in reports)}
                 elif args.command == "review-labels":
-                    report = pilot.review_labels(*batch, args.reviewer_lock, workers=workers)
+                    if args.batch_offsets is None:
+                        report = pilot.review_labels(*batch, args.reviewer_lock, workers=workers)
+                    else:
+                        batch_ids = [f"{args.batch_id}-{offset}" for offset in args.batch_offsets]
+                        reports = pilot.review_label_batches(*batch[:3], batch_ids, args.reviewer_lock, workers=workers)
+                        report = {"stage": "review_labels", "batches": reports,
+                                  "run_timings": reports[0]["run_timings"],
+                                  "failed": sum(item["failed"] for item in reports)}
                 elif args.command == "generate-qa":
                     report = pilot.generate_qa(*batch, args.label_batch_id, args.limit, args.annotator_lock,
                                                args.reviewer_lock, workers=workers, dry_run=args.dry_run)
