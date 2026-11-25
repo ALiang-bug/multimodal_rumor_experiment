@@ -80,6 +80,11 @@ def main():
     generate_qa.add_argument("--label-batch-id", required=True, help="Completed source label batch")
     for command in (generate_qa, review_qa):
         command.add_argument("--dry-run", action="store_true", help="Report eligible work without requesting the model")
+    benchmark = commands.add_parser("benchmark-vllm", help="Replay fixed val annotation requests at several concurrency levels")
+    benchmark.add_argument("--run-id", required=True, help="Imported MMFakeBench val snapshot")
+    benchmark.add_argument("--state-db", type=Path)
+    benchmark.add_argument("--model-lock", required=True, type=Path)
+    benchmark.add_argument("--levels", type=int, nargs="+", default=[1, 2, 4, 8, 16, 24, 32])
     invalidate = commands.add_parser("invalidate", help="Retire a version and invalidate its downstream jobs")
     invalidate.add_argument("--record-id", required=True)
     invalidate.add_argument("--content-hash", required=True)
@@ -104,11 +109,20 @@ def main():
         command.add_argument("--confirmed-links", type=Path)
         grouping_commands.append(command)
     for command in (preflight, validate, release, audit, evaluate, qa_eval, import_data, smoke, annotate,
-                    review_labels, generate_qa, review_qa, invalidate, export, human, blind, *grouping_commands):
+                    review_labels, generate_qa, review_qa, benchmark, invalidate, export, human, blind, *grouping_commands):
         command.add_argument("--config", default="configs/experiment.yaml", type=Path)
     args = parser.parse_args()
     try:
         contract = Contract(args.config)
+        if args.command == "benchmark-vllm":
+            from .benchmark import benchmark_annotator
+
+            path = args.state_db or contract.root / contract.experiment["paths"]["state_db"]
+            if not path.is_file():
+                raise ValueError(f"Imported val state database not found: {path}")
+            report = benchmark_annotator(contract, path, args.run_id, args.model_lock, args.levels)
+            print(json.dumps(report, ensure_ascii=False))
+            return 1 if report["best_concurrency"] is None else 0
         if args.command in {"annotate", "review-labels", "generate-qa", "review-qa"}:
             from . import pilot
             from .state import State

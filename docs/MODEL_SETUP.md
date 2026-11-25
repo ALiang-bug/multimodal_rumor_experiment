@@ -86,7 +86,7 @@ export GEMMA_SNAPSHOT="$MODELS_DIR/models--google--gemma-4-31B-it/snapshots/${GE
 ```bash
 vllm serve "$QWEN_SNAPSHOT" --served-model-name Qwen/Qwen3.8-27B \
   --host 127.0.0.1 --port 8000 --tensor-parallel-size 1 --dtype bfloat16 \
-  --max-model-len 12288 --max-num-seqs 4 --gpu-memory-utilization 0.92 \
+  --max-model-len 12288 --max-num-seqs 32 --gpu-memory-utilization 0.92 \
   --limit-mm-per-prompt '{"image":2}' --reasoning-parser qwen3 \
   2>&1 | tee runs/m1-qwen/server.log
 ```
@@ -106,7 +106,7 @@ python -m rumorlab preflight --mode real --role annotator \
 ```bash
 vllm serve "$GEMMA_SNAPSHOT" --served-model-name google/gemma-4-31B-it \
   --host 127.0.0.1 --port 8000 --tensor-parallel-size 1 --dtype bfloat16 \
-  --max-model-len 12288 --max-num-seqs 4 --gpu-memory-utilization 0.92 \
+  --max-model-len 12288 --max-num-seqs 32 --gpu-memory-utilization 0.92 \
   --limit-mm-per-prompt '{"image":2}' --reasoning-parser gemma4 \
   2>&1 | tee runs/m1-gemma/server.log
 ```
@@ -149,7 +149,7 @@ REVIEWER_BASE_URL=http://127.0.0.1:8000/v1 \
 
 Reviewer 只读取同一批次持久化且通过验证的模型候选。PASS 对原候选投影 silver，NEEDS_HUMAN 和 REJECT 分别投影待人工和排除。更改代码、锁或输入后使用新的 `--batch-id`。两阶段均只接受 MMFakeBench val。vLLM 解码使用结构和任务枚举约束，完整的条件式 Schema 保留在 Prompt 和本地校验中。
 
-标注、标签审核、QA 生成和 QA 审核的模型请求默认并发 4 条。对应角色的 vLLM 服务使用 `--max-num-seqs 4`。单卡继续依次加载两个角色。报告中的 `workers` 为本次并发上限，`elapsed_seconds` 为阶段耗时。同一批次重跑可以通过 `--workers` 调整并发，已完成任务复用缓存。
+标注、标签审核、QA 生成和 QA 审核的模型请求默认并发 4 条。vLLM 服务使用 `--max-num-seqs 32`，单卡继续依次加载两个角色。报告中的 `workers` 为本次客户端并发上限，`elapsed_seconds` 为阶段耗时。同一批次重跑可以通过 `--workers` 调整并发，已完成任务复用缓存。
 
 用 `python -m rumorlab export-snapshot --run-id mmfakebench-val-import-smoke-12` 导出源样本及该导入批次的当前标注与审核记录。
 
@@ -182,3 +182,19 @@ REVIEWER_BASE_URL=http://127.0.0.1:8000/v1 \
 ```
 
 两个 QA 命令均可加 `--dry-run` 查看候选数量。`PASS` 题目在快照中投影为 silver，`NEEDS_HUMAN` 题目进入已有盲审入口。对通过题目做人审抽查时，使用 `export-human --target-id` 指定 QA ID，答题输入不含答案键。上游标签或其采纳审核失效时，依赖它的题目和审核随之失效。
+
+## Qwen 并发基准
+
+在独占服务上按上文 Qwen 命令启动，保持 `--max-num-seqs 32`，另加 `--no-enable-prefix-caching --mm-processor-cache-gb 0`。固定请求会跨档位重复发送，这两个开关使缓存热度不成为对照变量。在项目根目录及已激活的环境中执行：
+
+```bash
+set -o pipefail
+mkdir -p runs/benchmark-qwen
+NO_PROXY=127.0.0.1,localhost no_proxy=127.0.0.1,localhost \
+ANNOTATOR_BASE_URL=http://127.0.0.1:8000/v1 \
+  python -m rumorlab benchmark-vllm --run-id mmfakebench-val-import-smoke-12 \
+    --model-lock runs/m1-qwen/model_lock.json --levels 1 2 4 8 16 24 32 \
+    | tee runs/benchmark-qwen/report.json
+```
+
+每档重放同一组 32 个真实图文标注请求和相同种子。基准只读 SQLite，发出的请求都会实际执行，失败统计不包含重试。单档进度输出到终端，最终 JSON 记录成功请求每分钟、生成 token 每秒、延迟及失败数。`best_concurrency` 是零失败档位中完成合格请求最快的一档。结果适用于当前 Qwen 标注负载和服务设置。

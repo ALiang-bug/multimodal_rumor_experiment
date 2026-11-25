@@ -20,8 +20,8 @@ from .state import State
 from .validation import ID_FIELDS, canonical_hash
 
 
-def _inputs(state, run_id):
-    row = state.db.execute(
+def _inputs(db, run_id):
+    row = db.execute(
         """SELECT imports.*, import_manifests.manifest FROM imports
            JOIN import_manifests USING(run_id) WHERE run_id = ?""", (run_id,),
     ).fetchone()
@@ -176,7 +176,7 @@ def _finish(state, manifest, stage, results, workers, started):
 def annotate(state, contract, run_id, batch_id, limit, annotator_lock, reviewer_lock, *, workers=1):
     started = monotonic()
     existing = _batch(state, run_id, batch_id)
-    row, source, records, samples, evidence = _inputs(state, run_id)
+    row, source, records, samples, evidence = _inputs(state.db, run_id)
     if not 1 <= limit <= len(samples):
         raise ValueError(f"--limit must be between 1 and {len(samples)}")
     sample_ids = list(dict.fromkeys(item["sample_id"] for item in source["selection"]))
@@ -258,7 +258,7 @@ def review_labels(state, contract, run_id, batch_id, reviewer_lock, *, workers=1
         raise ValueError("Reviewer model lock differs from the annotated batch")
     if manifest["config_hash"] != contract.config_hash or manifest["code_revision"] != _code_revision(contract):
         raise ValueError("Use the same code and configuration as the annotated batch")
-    row, _, _, samples, evidence = _inputs(state, run_id)
+    row, _, _, samples, evidence = _inputs(state.db, run_id)
     ids = [item["record_id"] for item in json.loads(batch["annotate_report"])["results"]
            if item.get("record_id") and item["status"] == "VALIDATED"]
     if not ids:
@@ -279,7 +279,7 @@ def review_labels(state, contract, run_id, batch_id, reviewer_lock, *, workers=1
 def generate_qa(state, contract, run_id, batch_id, label_batch_id, limit, annotator_lock, reviewer_lock,
                 *, workers, dry_run=False):
     started = monotonic()
-    row, _, _, samples, evidence = _inputs(state, run_id)
+    row, _, _, samples, evidence = _inputs(state.db, run_id)
     if limit < 1 or batch_id == label_batch_id:
         raise ValueError("QA requires a positive --limit and a new --batch-id distinct from --label-batch-id")
     existing = _batch(state, run_id, batch_id)
@@ -372,7 +372,7 @@ def review_qa(state, contract, run_id, batch_id, reviewer_lock, *, workers, dry_
     _, digest = load_lock(contract, "reviewer", reviewer_lock)
     if digest != manifest["runtime"]["reviewer_lock_sha256"]:
         raise ValueError("Reviewer model lock differs from the QA generation batch")
-    row, _, _, samples, evidence = _inputs(state, run_id)
+    row, _, _, samples, evidence = _inputs(state.db, run_id)
     by_id = {record[ID_FIELDS[record["record_type"]]]: record
              for record in snapshot_records(state, run_id, gold_votes=contract.gold_votes)}
     jobs = []

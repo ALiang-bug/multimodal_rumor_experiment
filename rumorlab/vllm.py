@@ -69,7 +69,7 @@ class VllmModel:
         response, _ = self.complete(request)
         return response
 
-    def complete(self, request):
+    def complete(self, request, *, seed=None):
         messages = [{"role": role, "content": content} for role, content in request.messages]
         assets = request.visible_inputs["images"]
         if len(assets) != len(request.images):
@@ -83,6 +83,8 @@ class VllmModel:
         generation = dict(self.settings["generation"])
         generation.pop("thinking")
         generation["max_tokens"] = generation.pop("max_output_tokens")
+        if seed is not None:
+            generation["seed"] = seed
         decoding_schema = request.response_schema
         if request.stage in {"annotate", "review_labels", "generate_qa", "review_qa"}:
             decoding_schema = _decoding_schema(decoding_schema, request.task_id)
