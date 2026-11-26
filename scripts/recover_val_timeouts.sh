@@ -8,7 +8,7 @@ BIN="$MMFND/.envs/rumorlab-m1/bin"
 PYTHON="$BIN/python"
 CFG=configs/experiment-single-label.yaml
 OUT=runs/m2-val1000-single-label
-DB="$OUT/state.sqlite3"
+DB=${RUMORLAB_STATE_DB:-"$OUT/state.sqlite3"}
 RUN=mmfakebench-val
 QLOCK=runs/m1-qwen/model_lock.json
 GLOCK=runs/m1-gemma/model_lock.json
@@ -19,6 +19,7 @@ export NO_PROXY=127.0.0.1,localhost no_proxy=127.0.0.1,localhost
 test -f "$DB"
 test -s "$BASELINE/annotate.json"
 test -s "$BASELINE/review-labels.json"
+printf 'Recovery state database %s\n' "$DB"
 ATTEMPT=$(mktemp -d "$OUT/recovery-$(date +%Y%m%d-%H%M%S)-XXXXXX")
 printf 'Recovery logs and reports %s\n' "$PWD/$ATTEMPT"
 
