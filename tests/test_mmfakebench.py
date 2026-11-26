@@ -115,3 +115,28 @@ class MMFakeBenchTests(TestCase):
         self.write([{**self.rows[0], "image_path": "/real/../escape.png"}])
         with self.assertRaisesRegex(ValueError, "image_path must stay inside"):
             prepare_mmfakebench(self.path, self.root, SEED, 1)
+
+    def test_cli_freezes_exact_test_prefix_in_source_order(self):
+        split = self.root / "MMFakeBench_test"
+        shutil.copytree(self.source, split)
+        path = split / "MMFakeBench_test.json"
+        ordered = [self.rows[index] for index in (4, 1, 3, 0, 2, 5)]
+        path.write_text(json.dumps(ordered), encoding="utf-8")
+        (split / ordered[4]["image_path"].lstrip("/")).unlink()
+        db_path = self.root / "prefix.db"
+        args = ["rumorlab", "ingest", "--adapter", "mmfakebench", "--run-id", "test-prefix",
+                "--first-n", "3", "--records", str(path), "--data-root", str(self.root),
+                "--config", str(ROOT / "configs/experiment.yaml"), "--state-db", str(db_path)]
+        with patch("sys.argv", args), redirect_stdout(StringIO()):
+            self.assertEqual(main(), 0)
+        state = State(db_path)
+        self.addCleanup(state.close)
+        records, manifest = map(json.loads, state.db.execute(
+            "SELECT records, manifest FROM imports JOIN import_manifests USING(run_id)"
+        ).fetchone())
+        self.assertEqual(manifest["method"], "source-prefix-v1")
+        self.assertEqual([item["source_row"] for item in manifest["selection"]], [1, 2, 3])
+        self.assertEqual([row["text"] for row in records], [row["text"] for row in ordered[:3]])
+        self.assertEqual({row["split"] for row in records}, {"test"})
+        with self.assertRaisesRegex(ValueError, "Cannot freeze MMFakeBench test row 5"):
+            prepare_mmfakebench(path, self.root, SEED, first_n=5)

@@ -1,4 +1,4 @@
-"""Run independent model stages on bounded MMFakeBench val batches."""
+"""Run independent model stages on bounded MMFakeBench batches."""
 
 from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import closing
@@ -12,6 +12,7 @@ from time import monotonic
 
 from .grouping import apply_plan, freeze_plan
 from .m1 import connect_role, load_lock
+from .mmfakebench import PREFIX_METHOD
 from .pipeline import JobFailed, execute, model_job_spec
 from .provenance import prepare_source_tasks, save_source_tasks
 from .qa import solver_projection
@@ -22,22 +23,27 @@ from .state import State
 from .validation import ID_FIELDS, canonical_hash
 
 
-def _inputs(db, run_id):
+def _inputs(db, run_id, *, allow_test_prefix=False):
     row = db.execute(
         """SELECT imports.*, import_manifests.manifest FROM imports
            JOIN import_manifests USING(run_id) WHERE run_id = ?""", (run_id,),
     ).fetchone()
     if row is None:
-        raise ValueError("Pilot requires an imported MMFakeBench val run")
+        raise ValueError("Pilot requires an imported MMFakeBench run")
     source = json.loads(row["manifest"])
-    if (source["adapter"], source["source_split"], source["assigned_split"]) != (
-        "mmfakebench", "MMFakeBench_val", "dev",
-    ):
-        raise ValueError("Pilot accepts only MMFakeBench val (dev)")
+    source_split = source["assigned_split"]
+    origin = (source["adapter"], source["source_split"], source_split)
+    test_prefix = (allow_test_prefix and origin == ("mmfakebench", "MMFakeBench_test", "test")
+                   and source.get("method") == PREFIX_METHOD)
+    if origin != ("mmfakebench", "MMFakeBench_val", "dev") and not test_prefix:
+        raise ValueError("Pilot accepts only MMFakeBench val (dev) or an explicitly frozen test prefix for labels")
     records = json.loads(row["records"])
     samples = {item["sample_id"]: item for item in records if item["record_type"] == "sample"}
-    if not samples or any(item["is_mock"] or item["split"] != "dev" for item in samples.values()):
-        raise ValueError("Pilot requires real dev samples")
+    if not samples or any(item["is_mock"] or item["split"] != source_split for item in samples.values()):
+        raise ValueError(f"Pilot requires real {source_split} samples")
+    if test_prefix and (len(samples) != source["sample_size"] or
+                        [item["source_row"] for item in source["selection"]] != list(range(1, len(samples) + 1))):
+        raise ValueError("MMFakeBench test selection must be a contiguous source prefix")
     evidence = {item["evidence_id"]: item for item in records if item["record_type"] == "evidence"}
     return row, source, records, samples, evidence
 
@@ -71,7 +77,8 @@ def _can_resume_revision(contract, pinned, current):
         return False
     allowed = {"rumorlab/state.py", "rumorlab/pipeline.py", "rumorlab/pilot.py", "rumorlab/cli.py",
                "rumorlab/requests.py", "rumorlab/vllm.py", "rumorlab/provenance.py", "scripts/run_val100_baseline.sh",
-               "rumorlab/timeout_recovery.py", "rumorlab/restore_val.py", "scripts/recover_val_timeouts.sh"}
+               "rumorlab/timeout_recovery.py", "rumorlab/restore_val.py", "scripts/recover_val_timeouts.sh",
+               "rumorlab/mmfakebench.py", "scripts/model_servers.sh", "scripts/run_test_first500.sh"}
     while current != pinned:
         metadata = git("log", "-1", "--format=%P%n%(trailers:key=Runtime-Resume-From,valueonly)", current)
         fields = metadata.stdout.split()
@@ -304,7 +311,7 @@ def _ordered_sample_ids(source, samples, seed, *, subset):
     sample_ids = list(dict.fromkeys(item["sample_id"] for item in source["selection"]))
     if set(sample_ids) != set(samples):
         raise ValueError("Import manifest and sample IDs disagree")
-    if subset:
+    if subset and source.get("method") != PREFIX_METHOD:
         sample_ids.sort(key=lambda sid: canonical_hash([seed, sid]))
     return sample_ids
 
@@ -312,7 +319,7 @@ def _ordered_sample_ids(source, samples, seed, *, subset):
 def annotate_batches(state, contract, run_id, batches, annotator_lock, reviewer_lock, *, workers,
                      before_dispatch=None):
     started = monotonic()
-    row, source, records, samples, evidence = _inputs(state.db, run_id)
+    row, source, records, samples, evidence = _inputs(state.db, run_id, allow_test_prefix=True)
     sample_ids = _ordered_sample_ids(source, samples, contract.experiment["seed"],
                                      subset=len(batches) != 1 or batches[0][2] < len(samples))
     tasks = contract.experiment["annotation"]["model_tasks"]
@@ -334,8 +341,8 @@ def annotate_batches(state, contract, run_id, batches, annotator_lock, reviewer_
             raise ValueError("Annotation batches cannot overlap")
         occupied.update(ids)
         selected = [samples[sid] for sid in ids]
-        if any(sample["split"] != "dev" for sample in selected):
-            raise ValueError("Pilot selection must remain entirely in dev")
+        if any(sample["split"] != source["assigned_split"] for sample in selected):
+            raise ValueError("Annotation selection must remain in its original split")
         work_count = sum(len(sample["target_claims"]) for sample in selected) * len(tasks)
         for role in locks:
             _check_budget(contract, role, work_count)
@@ -425,7 +432,7 @@ def review_label_batches(state, contract, run_id, batch_ids, reviewer_lock, *, w
     started = monotonic()
     if len(set(batch_ids)) != len(batch_ids):
         raise ValueError("Review batch IDs must be distinct")
-    row, _, _, samples, evidence = _inputs(state.db, run_id)
+    row, _, _, samples, evidence = _inputs(state.db, run_id, allow_test_prefix=True)
     _, lock_hash = load_lock(contract, "reviewer", reviewer_lock)
     execution_revision = _code_revision(contract)
     selections = []

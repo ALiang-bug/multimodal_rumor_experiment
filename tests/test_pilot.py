@@ -82,6 +82,19 @@ class PilotFixture:
             mock.start()
             self.addCleanup(mock.stop)
 
+    def use_test_prefix(self):
+        source = self.root / "MMFakeBench_test.json"
+        shutil.copyfile(self.root / "MMFakeBench_val.json", source)
+        shutil.copytree(self.root / "MMFakeBench_val", self.root / "MMFakeBench_test")
+        rows, sampling = prepare_mmfakebench(source, self.root, 42, first_n=2)
+        # Each fixture uses one run ID so seeded stage reports still bind to the imported cohort.
+        with self.state.db:
+            self.state.db.execute("DELETE FROM import_manifests WHERE run_id = ?", (RUN,))
+            self.state.db.execute("DELETE FROM imports WHERE run_id = ?", (RUN,))
+        import_snapshot(self.state, rows, self.contract, self.root, RUN, sampling=sampling)
+        self.samples = [record for _, record in rows]
+        self.sample = self.samples[0]
+
     def command(self, stage, *, expected=0, workers=None, batch=BATCH, extra=()):
         args = ["rumorlab", stage, "--run-id", RUN, "--batch-id", batch, "--config", str(self.config_path),
                 "--state-db", str(self.db_path), "--reviewer-lock", str(self.locks["reviewer"])]
@@ -385,6 +398,23 @@ class AnnotateTests(PilotFixture, TestCase):
 class SingleLabelAnnotateTests(PilotFixture, TestCase):
     config_path = SINGLE_LABEL_CONFIG
 
+    def test_frozen_test_prefix_annotates_in_source_order_and_recovers_timeouts(self):
+        self.use_test_prefix()
+        calls = []
+
+        def reply(body):
+            task = body["response_format"]["json_schema"]["schema"]["properties"]["task_id"]["const"]
+            calls.append(task)
+            if task == "image_text_consistency" and calls.count(task) <= 3:
+                raise TimeoutError
+            return self.payload(task)
+
+        with self.transport(reply):
+            report = self.command("annotate", extra=("--recover-timeouts",))
+        self.assertEqual({row["sample_id"] for row in report["results"]}, {self.samples[0]["sample_id"]})
+        self.assertEqual((report["failed"], report["timeout_recovery"]["selected"]), (0, 1))
+        self.assertEqual({row["split"] for row in self.export() if row["record_type"] == "sample"}, {"test"})
+
     def test_grouped_annotation_recovers_timeouts_before_returning(self):
         calls = []
 
@@ -581,6 +611,23 @@ class LabelFixture(PilotFixture):
 
 class SingleLabelReviewTests(LabelFixture, TestCase):
     config_path = SINGLE_LABEL_CONFIG
+
+    def test_reviews_frozen_test_prefix_and_recovers_timeout(self):
+        self.use_test_prefix()
+        self.seed_annotations("image_text_consistency")
+        calls = []
+
+        def reply(body):
+            calls.append(body)
+            if len(calls) <= 3:
+                raise TimeoutError
+            return PASS_REVIEW
+
+        with self.transport(reply):
+            report = self.command("review-labels", extra=("--recover-timeouts",))
+        self.assertEqual(report["timeout_recovery"]["selected"], 1)
+        self.assertEqual(report["results"][0]["decision"], "PASS")
+        self.assertEqual(report["results"][0]["sample_id"], self.samples[0]["sample_id"])
 
     def test_label_review_recovers_timeout_and_preserves_other_decisions(self):
         self.seed_annotations("image_text_consistency", "intent_analysis")

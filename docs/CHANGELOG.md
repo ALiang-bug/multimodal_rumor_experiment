@@ -111,3 +111,5 @@ A800 部署文档统一使用 `MMFND/models` 作为模型目录，按精确 revi
 `review-labels --batch-offsets` 读取原批次已验证的候选，先构造请求并批量登记，再用同一个请求池执行。保留单批入口、原审核任务 ID 和按批报告，增加包含准备、登记和推理用时的合并报告。SQLite 无需迁移。常规 vLLM 启动示例使用 64 个序列槽位，客户端默认 48 路并发。
 
 `annotate` 与 `review-labels` 新增可选的 `--recover-timeouts`。各自返回前复用同一在线模型服务，用 360 秒客户端超时补跑终态超时并合并结果。历史补跑入口、配置、Schema、模型锁和任务 ID 继续兼容。
+
+新增 `ingest --adapter mmfakebench --first-n` 冻结显式指定的官方 test JSON 前缀。`annotate` 和 `review-labels` 接受该前缀并保留 `split=test`，沿用同模型超时补跑和已有 Prompt、模型锁与 Schema。服务器脚本以独立本地状态库运行，在快照旁保存来源行号和与 val 的精确重合清单。既有 val 流程和抽样顺序保持兼容。

@@ -58,17 +58,19 @@ def main():
     import_kind = import_data.add_mutually_exclusive_group()
     import_kind.add_argument("--fixture", action="store_true")
     import_kind.add_argument("--adapter", choices=["generic_jsonl", "mmfakebench"])
-    import_data.add_argument("--sample-size", type=int, help="MMFakeBench sample count (default: entire source split)")
+    sampling_kind = import_data.add_mutually_exclusive_group()
+    sampling_kind.add_argument("--sample-size", type=int, help="MMFakeBench stratified sample count")
+    sampling_kind.add_argument("--first-n", type=int, help="Freeze the first N rows of an explicit official MMFakeBench test JSON")
     smoke = commands.add_parser("mock-run", help="Run the imported synthetic fixture through four model stages")
     smoke.add_argument("--run-id", required=True)
     smoke.add_argument("--state-db", type=Path)
     smoke.add_argument("--script", type=Path, help="JSONL of sample, claim, task and scripted responses")
     smoke.add_argument("--provenance", action="store_true", help="Also derive source labels from the manifest")
-    annotate = commands.add_parser("annotate", help="Annotate a bounded MMFakeBench val batch")
-    annotate.add_argument("--offset", type=int, default=0, help="Number of samples to skip in the fixed val ordering")
+    annotate = commands.add_parser("annotate", help="Annotate a bounded MMFakeBench val or frozen test-prefix batch")
+    annotate.add_argument("--offset", type=int, default=0, help="Number of samples to skip in the fixed run ordering")
     annotate.add_argument("--batch-offsets", type=int, nargs="+",
                           help="Share one inference queue across batches named <batch-id>-<offset>; --limit applies per batch")
-    review_labels = commands.add_parser("review-labels", help="Review the saved annotations of a val batch")
+    review_labels = commands.add_parser("review-labels", help="Review the saved annotations of a val or frozen test-prefix batch")
     review_labels.add_argument("--batch-offsets", type=int, nargs="+",
                                help="Share one inference queue across saved batches named <batch-id>-<offset>")
     for command in (annotate, review_labels):
@@ -79,7 +81,7 @@ def main():
     generate_qa = commands.add_parser("generate-qa", help="Generate QA from accepted val annotations")
     review_qa = commands.add_parser("review-qa", help="Review the saved QA candidates of a val batch")
     for command in (annotate, review_labels, generate_qa, review_qa):
-        command.add_argument("--run-id", required=True, help="Imported val snapshot")
+        command.add_argument("--run-id", required=True, help="Imported snapshot")
         command.add_argument("--batch-id", required=True, help="Versioned pilot batch within the snapshot")
         command.add_argument("--reviewer-lock", required=True, type=Path)
         command.add_argument("--state-db", type=Path)
@@ -272,6 +274,8 @@ def main():
             adapter = "fixture" if args.fixture else args.adapter or source["adapter"]
             if args.sample_size is not None and adapter != "mmfakebench":
                 raise ValueError("--sample-size is only supported by the mmfakebench adapter")
+            if args.first_n is not None and (adapter != "mmfakebench" or args.records is None):
+                raise ValueError("--first-n requires --adapter mmfakebench and explicit --records")
             configured_path = contract.experiment["fixture"]["records"] if args.fixture else source["input_jsonl"]
             path = args.records or (contract.root / configured_path if configured_path else None)
             root = args.data_root or contract.root
@@ -288,7 +292,8 @@ def main():
                     path = root / "MMFakeBench_val.json"
                     if not path.is_file():
                         path = root / "MMFakeBench_val/source/MMFakeBench_val.json"
-                rows, sampling = prepare_mmfakebench(path, root, contract.experiment["seed"], args.sample_size)
+                rows, sampling = prepare_mmfakebench(path, root, contract.experiment["seed"], args.sample_size,
+                                                     first_n=args.first_n)
             elif adapter in {"generic_jsonl", "fixture"}:
                 if path is None:
                     raise ValueError("Supply --records, configure source.input_jsonl or select --fixture")

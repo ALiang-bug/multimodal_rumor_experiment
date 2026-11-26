@@ -1,4 +1,4 @@
-"""Adapt an official MMFakeBench split and freeze a stratified sample."""
+"""Adapt an official MMFakeBench split and freeze its selected rows."""
 
 from collections import defaultdict
 import hashlib
@@ -11,6 +11,7 @@ from .validation import canonical_hash
 
 DATASET = "MMFakeBench"
 SOURCE_SPLITS = {"MMFakeBench_test": "test", "MMFakeBench_val": "dev"}
+PREFIX_METHOD = "source-prefix-v1"
 VERACITY = {"true": "real", "real": "real", "fake": "fake"}
 USAGE_PROTOCOL = "https://huggingface.co/datasets/liuxuannan/MMFakeBench/blob/main/README.md"
 
@@ -53,7 +54,7 @@ def _group_candidates(raw_rows, name):
     return strata
 
 
-def prepare_mmfakebench(path, media_root, seed, sample_size=None):
+def prepare_mmfakebench(path, media_root, seed, sample_size=None, *, first_n=None):
     from PIL import Image
 
     name = path.stem
@@ -61,6 +62,8 @@ def prepare_mmfakebench(path, media_root, seed, sample_size=None):
         raise ValueError("Expected official MMFakeBench_test.json or MMFakeBench_val.json")
     if sample_size is not None and sample_size < 1:
         raise ValueError("Sample size must be positive")
+    if first_n is not None and (name != "MMFakeBench_test" or sample_size is not None or first_n < 1):
+        raise ValueError("--first-n requires official MMFakeBench test and a positive count")
     media_root = media_root.resolve()
     if not (media_root / name).is_dir():
         raise ValueError(f"Expected extracted image directory at {media_root / name}")
@@ -68,8 +71,11 @@ def prepare_mmfakebench(path, media_root, seed, sample_size=None):
     raw_rows = json.loads(raw_bytes)
     if not isinstance(raw_rows, list):
         raise ValueError("MMFakeBench annotations must be a JSON array")
-    strata = _group_candidates(raw_rows, name)
+    considered = raw_rows if first_n is None else raw_rows[:first_n]
+    strata = _group_candidates(considered, name)
     population = sum(map(len, strata.values()))
+    if first_n is not None and population != first_n:
+        raise ValueError(f"First {first_n} MMFakeBench rows include duplicate source IDs or exceed the file length")
     if population == 0:
         raise ValueError("MMFakeBench annotations contain no source rows")
     if sample_size is None:
@@ -81,22 +87,26 @@ def prepare_mmfakebench(path, media_root, seed, sample_size=None):
     source = {
         "dataset_name": DATASET, "dataset_version": f"sha256:{source_hash}",
         "license_reference": USAGE_PROTOCOL, "preserve_source_split": True,
-        "source_veracity_mapping": {raw["gt_answers"]: VERACITY[raw["gt_answers"].lower()] for raw in raw_rows},
+        "source_veracity_mapping": {raw["gt_answers"]: VERACITY[raw["gt_answers"].lower()] for raw in considered},
     }
 
-    # Largest remainders keep the source proportions while allocating exactly sample_size rows.
-    allocation = {key: divmod(len(candidates) * sample_size, population) for key, candidates in strata.items()}
-    quotas = {key: whole for key, (whole, _) in allocation.items()}
-    remainder_order = sorted(quotas, key=lambda key: (-allocation[key][1], key))
-    for key in remainder_order[:sample_size - sum(quotas.values())]:
-        quotas[key] += 1
+    if first_n is not None:
+        quotas = {key: len(candidates) for key, candidates in strata.items()}
+    else:
+        # Largest remainders keep the source proportions while allocating exactly sample_size rows.
+        allocation = {key: divmod(len(candidates) * sample_size, population) for key, candidates in strata.items()}
+        quotas = {key: whole for key, (whole, _) in allocation.items()}
+        remainder_order = sorted(quotas, key=lambda key: (-allocation[key][1], key))
+        for key in remainder_order[:sample_size - sum(quotas.values())]:
+            quotas[key] += 1
 
     rows, selection, quarantine, counts = [], [], [], []
     selected_pairs = {}
     duplicate_media_rows = 0
     for key in sorted(strata):
         count = 0
-        ranked = sorted(strata[key], key=lambda row: (canonical_hash([seed, row[0]]), row[0]))
+        ranked = (strata[key] if first_n is not None else
+                  sorted(strata[key], key=lambda row: (canonical_hash([seed, row[0]]), row[0])))
         for source_id, index, raw, relative in ranked:
             if count == quotas[key]:
                 break
@@ -115,6 +125,8 @@ def prepare_mmfakebench(path, media_root, seed, sample_size=None):
                 if record["media"][0]["mime_type"] not in {"image/png", "image/jpeg", "image/webp"}:
                     raise ValueError("unsupported media format")
             except (OSError, ValueError, Image.DecompressionBombError) as exc:
+                if first_n is not None:
+                    raise ValueError(f"Cannot freeze MMFakeBench test row {index + 1} ({relative}): {exc}") from exc
                 reason = str(exc)
                 if isinstance(exc, OSError):
                     reason = exc.strerror or type(exc).__name__
@@ -127,7 +139,8 @@ def prepare_mmfakebench(path, media_root, seed, sample_size=None):
                 if previous != key:
                     raise ValueError(f"Conflicting MMFakeBench labels for identical image bytes and caption at row {index + 1}")
                 duplicate_media_rows += 1
-                continue
+                if first_n is None:
+                    continue
             selected_pairs[pair] = key
             rows.append((index + 1, record))
             selection.append({**reference, "sample_id": record["sample_id"]})
@@ -139,11 +152,17 @@ def prepare_mmfakebench(path, media_root, seed, sample_size=None):
         counts.append({"source_veracity": key[0], "fake_cls": key[1] or None,
                        "population": len(strata[key]), "selected": count})
 
+    if first_n is not None:
+        rows.sort(key=lambda row: row[0])
+        selection.sort(key=lambda item: item["source_row"])
     manifest = {
-        "adapter": "mmfakebench", "method": "proportional-sha256-v1", "seed": seed,
+        "adapter": "mmfakebench", "method": PREFIX_METHOD if first_n is not None else "proportional-sha256-v1",
+        "seed": seed,
         "annotation_filename": path.name, "annotation_sha256": source_hash, "source_split": name,
         "assigned_split": source_split, "input_rows": len(raw_rows), "unique_source_rows": population,
-        "duplicate_source_rows": len(raw_rows) - population, "duplicate_media_rows": duplicate_media_rows,
+        "duplicate_source_rows": len(considered) - population, "duplicate_media_rows": duplicate_media_rows,
         "sample_size": sample_size, "strata": counts, "quarantine": quarantine, "selection": selection,
     }
+    if first_n is not None:
+        manifest["considered_rows"] = len(considered)
     return rows, manifest

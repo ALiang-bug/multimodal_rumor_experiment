@@ -167,6 +167,23 @@ Reviewer 只读取同一批次持久化且通过验证的模型候选。PASS 对
 
 打标命令返回后再停止 Qwen 并启动 Gemma。Gemma 首轮读取补跑成功的已校验标注。审核命令同样在返回前补跑其最终超时，已给出的审核决定保留。合并后的报告以最终结果计算 `failed`，`timeout_recovery.first_pass_failed` 记录补跑前的失败数。补跑结束后还存在失败时，命令返回 1 并保留结果报告。正式运行宜通过 `--state-db` 使用本地盘上的工作库。
 
+## MMFakeBench test 前 500 条初评
+
+在服务器的仓库根目录执行 `bash scripts/run_test_first500.sh`。脚本默认查找
+`MMFND/MAR_KDD/dataset/MMFakeBench` 下的官方 `MMFakeBench_test.json`（数据根目录或
+`MMFakeBench_test/source/`）。其他位置可传入已解压图像目录的父目录和官方 JSON 的路径。
+导入固定原始数组第 1–500 行，坏图、重复来源 ID 或行数不足时中止并报告，保持原始样本范围。
+
+脚本只读原 `mmfakebench-val` 导入，以正文和图片 SHA-256 检查重合。对照文件
+`val-overlap.json` 列出应从初评分数排除的 ID。仍保留这部分样本的标注和审核结果，方便核查。
+该检查仅覆盖哈希完全相同的内容。改写、转码等近重复和同一事件仍需后续核验。
+
+Qwen 标注四项模型任务，并发 48。Gemma 审核经校验的候选，并发 16。每个阶段在切换模型前
+自动补跑一次终态技术超时。工作库位于服务器本地盘的 `/var/tmp/rumorlab-$UID/mmfakebench-test-first500`，
+也可用 `RUMORLAB_TEST_WORK_DIR` 指定。用同一配置、同一目录重跑可复用已完成的任务。
+每次尝试分别保存来源清单、重合报告、阶段报告和 JSONL 快照至 `runs/mmfakebench-test-first500/attempt-*/`。
+Gemma 的 PASS 产出银标初评参考。正式测试分数仍要求独立人工核验。
+
 ## M2 QA 生成与审核
 
 已有真实审核通过的 `m2-pilot-citations-02` 可直接作为输入。QA 使用独立批次，记录源标注批次、标签与审核的哈希以及当前 QA 代码版本。以下命令从最多 8 个已接受的标签各生成至多一道题。两条来源轴在没有可比较的参考版本时不出题。若可见材料不足，Qwen 可返回 `SKIPPED` 和原因。

@@ -73,7 +73,9 @@ def _recover_batches(state, contract, run_id, stage, baseline, annotator_lock, r
                      *, annotation=None):
     started = monotonic()
     role = "annotator" if stage == "annotate" else "reviewer"
-    source, _, records, samples, evidence = pilot._inputs(state.db, run_id)
+    source, sampling, records, samples, evidence = pilot._inputs(
+        state.db, run_id, allow_test_prefix=annotation is None,
+    )
     plan = state.db.execute("SELECT * FROM split_plans WHERE run_id = ?", (run_id,)).fetchone()
     if plan is None:
         raise ValueError("Timeout recovery requires an existing frozen split")
@@ -122,8 +124,8 @@ def _recover_batches(state, contract, run_id, stage, baseline, annotator_lock, r
     jobs, specs, material_cache = [], [], {}
     for batch_id, (sample_id, claim_id, task), previous_id, record_id in selected:
         sample = samples[sample_id]
-        if sample["split"] != "dev" or task not in contract.experiment["annotation"]["model_tasks"]:
-            raise ValueError("Timeout recovery requires a val model task")
+        if sample["split"] != sampling["assigned_split"] or task not in contract.experiment["annotation"]["model_tasks"]:
+            raise ValueError("Timeout recovery requires a model task in the original split")
         claim = next((claim for claim in sample["target_claims"] if claim["claim_id"] == claim_id), None)
         if claim is None:
             raise ValueError(f"Missing frozen claim: {claim_id}")
