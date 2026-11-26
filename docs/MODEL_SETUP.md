@@ -161,6 +161,12 @@ Reviewer 只读取同一批次持久化且通过验证的模型候选。PASS 对
 
 独立阶段报告保存在 `runs/m2-val100-baseline/`。单个模型任务失败会写入报告，脚本继续处理后续批次并最终返回非零。端点或配置错误会立即中止。重跑同一阶段可以复用已有有效结果。Gemma 审核已验证的候选。用 `python -m rumorlab export-snapshot --run-id mmfakebench-val > runs/m2-val100-baseline/snapshot.jsonl` 导出完整 val 快照，再按阶段报告的 `manifest_id` 匹配 `producer.run_id`，定位本轮标注与审核记录。质量排查应核对具体输入、标签、理由和引用，以及 Reviewer 的决定与理由，再据此修改 Prompt。
 
+### 在切换模型前补跑本阶段超时
+
+正式运行时，在原 `annotate` 和 `review-labels` 命令各加 `--recover-timeouts`。每个命令结束首轮任务后，使用当前仍在线的同一模型补跑最终为 `TimeoutError` 的任务。补跑沿用本阶段并发和原任务键，客户端超时为 360 秒。每个任务至多进入一次补跑阶段，该阶段仍使用现有请求重试上限。
+
+打标命令返回后再停止 Qwen 并启动 Gemma。Gemma 首轮读取补跑成功的已校验标注。审核命令同样在返回前补跑其最终超时，已给出的审核决定保留。合并后的报告以最终结果计算 `failed`，`timeout_recovery.first_pass_failed` 记录补跑前的失败数。补跑结束后还存在失败时，命令返回 1 并保留结果报告。正式运行宜通过 `--state-db` 使用本地盘上的工作库。
+
 ## M2 QA 生成与审核
 
 已有真实审核通过的 `m2-pilot-citations-02` 可直接作为输入。QA 使用独立批次，记录源标注批次、标签与审核的哈希以及当前 QA 代码版本。以下命令从最多 8 个已接受的标签各生成至多一道题。两条来源轴在没有可比较的参考版本时不出题。若可见材料不足，Qwen 可返回 `SKIPPED` 和原因。

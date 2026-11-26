@@ -74,6 +74,8 @@ def main():
     for command in (annotate, review_labels):
         command.add_argument("--prefetch-group-size", type=int,
                              help="Logical batches per inference group; prepare the next group in parallel")
+        command.add_argument("--recover-timeouts", action="store_true",
+                             help="Retry terminal timeouts once as a recovery phase on the same model server")
     generate_qa = commands.add_parser("generate-qa", help="Generate QA from accepted val annotations")
     review_qa = commands.add_parser("review-qa", help="Review the saved QA candidates of a val batch")
     for command in (annotate, review_labels, generate_qa, review_qa):
@@ -217,6 +219,13 @@ def main():
                                                args.reviewer_lock, workers=workers, dry_run=args.dry_run)
                 else:
                     report = pilot.review_qa(*batch, args.reviewer_lock, workers=workers, dry_run=args.dry_run)
+                if getattr(args, "recover_timeouts", False):
+                    from .timeout_recovery import recover_stage_report
+
+                    report = recover_stage_report(
+                        state, contract, args.run_id, report, getattr(args, "annotator_lock", None),
+                        args.reviewer_lock, workers,
+                    )
             finally:
                 state.close()
             if group_size:

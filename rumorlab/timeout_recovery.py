@@ -36,6 +36,41 @@ def _reports(path, run_id, stage):
 
 
 def recover_timeouts(state, contract, run_id, stage, attempt, annotator_lock, reviewer_lock, workers):
+    annotation = _reports(attempt / "annotate.json", run_id, "annotate")
+    baseline = annotation if stage == "annotate" else _reports(
+        attempt / "review-labels.json", run_id, "review_labels",
+    )
+    if baseline.keys() != annotation.keys():
+        raise ValueError("Original annotate and review-labels batch IDs differ")
+    return _recover_batches(state, contract, run_id, stage, baseline, annotator_lock, reviewer_lock, workers,
+                            annotation=annotation)
+
+
+def recover_stage_report(state, contract, run_id, report, annotator_lock, reviewer_lock, workers):
+    """Retry the just-finished phase against its still-running model endpoint."""
+    batches = report.get("batches", [report])
+    if not any(_timed_out(row) for batch in batches for row in batch["results"]):
+        return report
+
+    baseline = {batch["batch_id"]: batch for batch in batches}
+    recovery = _recover_batches(
+        state, contract, run_id, report["stage"], baseline, annotator_lock, reviewer_lock, workers,
+    )
+    stats = {key: value for key, value in recovery.items() if key not in {"stage", "batches"}}
+    stats["first_pass_failed"] = report["failed"]
+    updated = {batch["batch_id"]: batch for batch in recovery["batches"]}
+    merged = []
+    for batch_id, batch in baseline.items():
+        final = updated.get(batch_id, batch)
+        merged.append({**batch, "results": final["results"], "failed": final["failed"]})
+    if "batches" not in report:
+        return {**merged[0], "timeout_recovery": stats}
+    return {**report, "batches": merged, "failed": sum(batch["failed"] for batch in merged),
+            "timeout_recovery": stats}
+
+
+def _recover_batches(state, contract, run_id, stage, baseline, annotator_lock, reviewer_lock, workers,
+                     *, annotation=None):
     started = monotonic()
     role = "annotator" if stage == "annotate" else "reviewer"
     source, _, records, samples, evidence = pilot._inputs(state.db, run_id)
@@ -43,15 +78,9 @@ def recover_timeouts(state, contract, run_id, stage, attempt, annotator_lock, re
     if plan is None:
         raise ValueError("Timeout recovery requires an existing frozen split")
     apply_plan(records, json.loads(plan["plan"]))
-    annotation = _reports(attempt / "annotate.json", run_id, "annotate")
-    baseline = annotation if stage == "annotate" else _reports(
-        attempt / "review-labels.json", run_id, "review_labels",
-    )
-    if baseline.keys() != annotation.keys():
-        raise ValueError("Original annotate and review-labels batch IDs differ")
     locks = {name: load_lock(contract, name, path)[1] for name, path in (
         ("annotator", annotator_lock), ("reviewer", reviewer_lock),
-    )}
+    ) if path is not None}
     revision = pilot._code_revision(contract)
     report_column = "annotate_report" if stage == "annotate" else "review_report"
     selected, existing, manifests = [], {}, {}
@@ -60,8 +89,9 @@ def recover_timeouts(state, contract, run_id, stage, attempt, annotator_lock, re
         if batch is None or not batch[report_column]:
             raise ValueError(f"Missing completed batch: {batch_id}")
         manifest = json.loads(batch["manifest"])
+        first_annotation = annotation[batch_id] if annotation is not None else None
         if (manifest["run_id"] != old["manifest_id"]
-                or manifest["run_id"] != annotation[batch_id]["manifest_id"]
+                or (first_annotation is not None and manifest["run_id"] != first_annotation["manifest_id"])
                 or manifest["split_manifest_id"] != "split_" + plan["digest"]
                 or manifest["config_hash"] != contract.config_hash
                 or any(manifest["runtime"][f"{name}_lock_sha256"] != digest for name, digest in locks.items())
@@ -73,7 +103,7 @@ def recover_timeouts(state, contract, run_id, stage, attempt, annotator_lock, re
         if stage == "annotate":
             targets = [(key, job_id, None) for key, job_id in old_timeouts.items()]
         else:
-            annotation_timeouts = {_key(row) for row in annotation[batch_id]["results"] if _timed_out(row)}
+            annotation_timeouts = {_key(row) for row in (first_annotation or {}).get("results", ()) if _timed_out(row)}
             original_review_keys = {_key(row) for row in old["results"]}
             targets = [
                 (_key(row), old_timeouts.get(_key(row)), row["record_id"])
@@ -130,11 +160,13 @@ def recover_timeouts(state, contract, run_id, stage, attempt, annotator_lock, re
         existing[batch_id][_key(result)] = result
         updated.add(batch_id)
     reports = [pilot._finish(state, manifests[batch_id], stage, list(existing[batch_id].values()),
-                             workers, started, execution_revision=revision)
+                             workers, started, execution_revision=revision,
+                             timings=baseline[batch_id].get("run_timings"))
                for batch_id in manifests if batch_id in updated]
     failed = sum(row["status"] == "FAILED" for row in results)
     return {
         "stage": stage, "timeout_seconds": TIMEOUT, "workers": workers,
+        "elapsed_seconds": round(monotonic() - started, 3),
         "selected": len(selected), "original_timeouts": sum(previous_id is not None for _, _, previous_id, _ in selected),
         "new_candidates": sum(previous_id is None for _, _, previous_id, _ in selected),
         "cached": sum(result.get("cached", False) for result in results), "failed": failed,

@@ -385,6 +385,39 @@ class AnnotateTests(PilotFixture, TestCase):
 class SingleLabelAnnotateTests(PilotFixture, TestCase):
     config_path = SINGLE_LABEL_CONFIG
 
+    def test_grouped_annotation_recovers_timeouts_before_returning(self):
+        calls = []
+
+        def reply(body):
+            properties = body["response_format"]["json_schema"]["schema"]["properties"]
+            task = properties["task_id"]["const"]
+            claim = properties["target_claim"]["const"]
+            sample = next(sample for sample in self.samples if sample["target_claims"][0] == claim)
+            key = (sample["sample_id"], task)
+            calls.append(key)
+            if task == "image_text_consistency" and calls.count(key) <= 3:
+                raise TimeoutError
+            payload = self.payload(task, sample)
+            if task == "intent_analysis":
+                payload["labels"] = []
+            return payload
+
+        flags = ("--batch-offsets", "0", "1", "--prefetch-group-size", "1", "--recover-timeouts")
+        with self.transport(reply):
+            report = self.command("annotate", expected=1, extra=flags)
+        stats = report["timeout_recovery"]
+        self.assertEqual((stats["selected"], stats["failed"], stats["first_pass_failed"]), (2, 0, 4))
+        self.assertEqual([task for _, task in calls[-2:]], ["image_text_consistency"] * 2)
+        self.assertEqual([batch["failed"] for batch in report["batches"]], [1, 1])
+        self.assertEqual(len(report["run_timings"]["groups"]), 2)
+        for batch in report["batches"]:
+            saved = self.state.db.execute(
+                "SELECT annotate_report FROM pilot_batches WHERE batch_id = ?", (batch["batch_id"],),
+            ).fetchone()[0]
+            self.assertEqual(json.loads(saved)["results"], batch["results"])
+        with self.transport(lambda _: self.fail("Settled tasks must survive a repeated stage command")):
+            self.assertEqual(self.command("annotate", expected=1, extra=flags)["failed"], 2)
+
     def test_timeout_recovery_only_reopens_original_timeouts_once(self):
         def reply(body, recovery=False):
             properties = body["response_format"]["json_schema"]["schema"]["properties"]
@@ -532,7 +565,11 @@ class LabelFixture(PilotFixture):
             self.state.db.execute(
                 "INSERT INTO pilot_batches VALUES (?, ?, ?, ?, ?, NULL)",
                 (RUN, batch, manifest["run_id"], json.dumps(manifest), json.dumps({
-                    "failed": 0, "results": [{"status": "VALIDATED", "record_id": row["annotation_id"]} for row in records],
+                    "failed": 0, "results": [
+                        {"status": "VALIDATED", "record_id": row["annotation_id"], "sample_id": row["sample_id"],
+                         "claim_id": row["payload"]["target_claim"]["claim_id"], "task_id": row["payload"]["task_id"]}
+                        for row in records
+                    ],
                 })),
             )
             self.state.db.executemany(
@@ -544,6 +581,29 @@ class LabelFixture(PilotFixture):
 
 class SingleLabelReviewTests(LabelFixture, TestCase):
     config_path = SINGLE_LABEL_CONFIG
+
+    def test_label_review_recovers_timeout_and_preserves_other_decisions(self):
+        self.seed_annotations("image_text_consistency", "intent_analysis")
+        calls = []
+
+        def reply(body):
+            schema = body["response_format"]["json_schema"]["schema"]
+            task = schema["properties"]["suggested_annotation"]["anyOf"][0]["properties"]["task_id"]["const"]
+            calls.append(task)
+            if task == "image_text_consistency" and calls.count(task) <= 3:
+                raise TimeoutError
+            if task == "intent_analysis":
+                return {**PASS_REVIEW, "decision": "REJECT", "issue_codes": ["LABEL_ERROR"]}
+            return PASS_REVIEW
+
+        with self.transport(reply):
+            report = self.command("review-labels", extra=("--recover-timeouts",))
+        stats = report["timeout_recovery"]
+        self.assertEqual((stats["selected"], stats["new_candidates"], stats["first_pass_failed"]), (1, 0, 1))
+        self.assertEqual(calls[-1], "image_text_consistency")
+        self.assertEqual(calls.count("intent_analysis"), 1)
+        self.assertEqual({row["task_id"]: row["decision"] for row in report["results"]},
+                         {"image_text_consistency": "PASS", "intent_analysis": "REJECT"})
 
     def test_timeout_recovery_reviews_old_timeouts_and_new_candidates(self):
         records = self.seed_annotations("image_text_consistency", "intent_analysis", "persuasion_strategy")
