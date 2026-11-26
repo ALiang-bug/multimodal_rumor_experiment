@@ -95,6 +95,19 @@ class PilotFixture:
             self.assertEqual(main(), expected, err.getvalue() or out.getvalue())
         return json.loads(out.getvalue()) if out.getvalue() else err.getvalue()
 
+    def save_attempt(self, stage, report):
+        path = self.root / f"{stage}.json"
+        path.write_text(json.dumps({"stage": stage.replace("-", "_"), "batches": [report]}), encoding="utf-8")
+
+    def recover_timeouts(self, stage, expected=0):
+        args = ["rumorlab", "recover-timeouts", "--stage", stage, "--run-id", RUN, "--config", str(self.config_path),
+                "--state-db", str(self.db_path), "--attempt-dir", str(self.root), "--workers", "1",
+                "--reviewer-lock", str(self.locks["reviewer"]), "--annotator-lock", str(self.locks["annotator"])]
+        out, err = StringIO(), StringIO()
+        with patch("sys.argv", args), redirect_stdout(out), redirect_stderr(err):
+            self.assertEqual(main(), expected, err.getvalue() or out.getvalue())
+        return json.loads(out.getvalue())
+
     def payload(self, task, sample=None):
         return {
             "task_id": task, "target_claim": (sample or self.sample)["target_claims"][0], "applicability": "applicable",
@@ -371,6 +384,38 @@ class AnnotateTests(PilotFixture, TestCase):
 class SingleLabelAnnotateTests(PilotFixture, TestCase):
     config_path = SINGLE_LABEL_CONFIG
 
+    def test_timeout_recovery_only_reopens_original_timeouts_once(self):
+        def reply(body, recovery=False):
+            properties = body["response_format"]["json_schema"]["schema"]["properties"]
+            task = properties["task_id"]["const"]
+            if task == "image_text_consistency" or (task == "reality_plausibility" and not recovery):
+                raise TimeoutError
+            sample = next(sample for sample in self.samples if sample["target_claims"][0] == properties["target_claim"]["const"])
+            payload = self.payload(task, sample)
+            if task == "intent_analysis":
+                payload["labels"] = []
+            return payload
+
+        with self.transport(reply):
+            baseline = self.command("annotate", expected=1)
+        self.save_attempt("annotate", baseline)
+        self.calls.clear()
+        with self.transport(lambda body: reply(body, recovery=True)):
+            init = VllmModel.__init__
+            with patch.object(VllmModel, "__init__", autospec=True, side_effect=init) as constructor:
+                report = self.recover_timeouts("annotate", expected=1)
+            self.assertEqual(constructor.call_args.args[-1], 360)
+        self.assertEqual((report["selected"], report["failed"], len(self.calls)), (2, 1, 4))
+        old = {row["task_id"]: row for row in baseline["results"]}
+        new = {row["task_id"]: row for row in report["batches"][0]["results"]}
+        self.assertEqual(new["reality_plausibility"]["status"], "VALIDATED")
+        self.assertEqual(new["reality_plausibility"]["job_id"], old["reality_plausibility"]["job_id"])
+        self.assertEqual(new["persuasion_strategy"], old["persuasion_strategy"])
+        self.assertEqual(new["intent_analysis"], old["intent_analysis"])
+        with self.transport(lambda _: self.fail("Recovery must not rerun completed or exhausted jobs")):
+            resumed = self.recover_timeouts("annotate", expected=1)
+        self.assertEqual((resumed["cached"], resumed["failed"]), (1, 1))
+
     def test_v2_single_labels_are_decoded_and_validated(self):
         invalid = {
             "image_text_consistency": {"labels": ["UNKNOWN"], "unknown_reason": "Unclear."},
@@ -451,6 +496,50 @@ class LabelFixture(PilotFixture):
 
 class SingleLabelReviewTests(LabelFixture, TestCase):
     config_path = SINGLE_LABEL_CONFIG
+
+    def test_timeout_recovery_reviews_old_timeouts_and_new_candidates(self):
+        records = self.seed_annotations("image_text_consistency", "intent_analysis", "persuasion_strategy")
+        row = self.state.db.execute("SELECT manifest_id FROM pilot_batches WHERE batch_id = ?", (BATCH,)).fetchone()
+        annotation = {"stage": "annotate", "run_id": RUN, "batch_id": BATCH, "manifest_id": row["manifest_id"],
+                      "results": [{"sample_id": label["sample_id"],
+                                   "claim_id": label["payload"]["target_claim"]["claim_id"],
+                                   "task_id": label["payload"]["task_id"], "status": "VALIDATED",
+                                   "record_id": label["annotation_id"]} for label in records]}
+        original_annotation = {**annotation, "results": annotation["results"][:2] + [
+            {**annotation["results"][2], "status": "FAILED", "category": "technical",
+             "technical_error": "TimeoutError"},
+        ]}
+        self.save_attempt("annotate", original_annotation)
+
+        def store_annotation(report):
+            with self.state.db:
+                self.state.db.execute("UPDATE pilot_batches SET annotate_report = ? WHERE batch_id = ?",
+                                      (json.dumps(report), BATCH))
+
+        store_annotation({**annotation, "results": annotation["results"][:2]})
+
+        def task(body):
+            schema = body["response_format"]["json_schema"]["schema"]
+            return schema["properties"]["suggested_annotation"]["anyOf"][0]["properties"]["task_id"]["const"]
+
+        def initial_review(body):
+            if task(body) == "image_text_consistency":
+                raise TimeoutError
+            return PASS_REVIEW
+
+        with self.transport(initial_review):
+            baseline = self.command("review-labels", expected=1)
+        self.save_attempt("review-labels", baseline)
+        store_annotation(annotation)
+        self.calls.clear()
+        with self.transport(lambda _: PASS_REVIEW):
+            repaired = self.recover_timeouts("review-labels")
+        self.assertEqual((repaired["original_timeouts"], repaired["new_candidates"], repaired["failed"]), (1, 1, 0))
+        self.assertEqual([task(body) for body in self.calls], ["image_text_consistency", "persuasion_strategy"])
+        self.assertEqual(repaired["batches"][0]["results"][1], baseline["results"][1])
+        with self.transport(lambda _: self.fail("Completed reviews must be reused")):
+            resumed = self.recover_timeouts("review-labels")
+        self.assertEqual((resumed["cached"], resumed["failed"]), (2, 0))
 
     def payload(self, task, sample=None):
         payload = super().payload(task, sample)

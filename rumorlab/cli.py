@@ -88,6 +88,14 @@ def main():
     generate_qa.add_argument("--label-batch-id", required=True, help="Completed source label batch")
     for command in (generate_qa, review_qa):
         command.add_argument("--dry-run", action="store_true", help="Report eligible work without requesting the model")
+    recover = commands.add_parser("recover-timeouts", help="Recover terminal timeouts from a completed val attempt")
+    recover.add_argument("--stage", required=True, choices=("annotate", "review-labels"))
+    recover.add_argument("--attempt-dir", required=True, type=Path)
+    recover.add_argument("--state-db", required=True, type=Path)
+    recover.add_argument("--run-id", required=True)
+    recover.add_argument("--annotator-lock", required=True, type=Path)
+    recover.add_argument("--reviewer-lock", required=True, type=Path)
+    recover.add_argument("--workers", required=True, type=int)
     benchmark = commands.add_parser("benchmark-vllm", help="Replay fixed val annotation requests at several concurrency levels")
     benchmark.add_argument("--run-id", required=True, help="Imported MMFakeBench val snapshot")
     benchmark.add_argument("--state-db", type=Path)
@@ -120,7 +128,8 @@ def main():
         command.add_argument("--confirmed-links", type=Path)
         grouping_commands.append(command)
     for command in (preflight, validate, release, audit, evaluate, qa_eval, import_data, smoke, annotate,
-                    review_labels, generate_qa, review_qa, benchmark, invalidate, export, human, blind, *grouping_commands):
+                    review_labels, generate_qa, review_qa, recover, benchmark, invalidate, export, human, blind,
+                    *grouping_commands):
         command.add_argument("--config", default="configs/experiment.yaml", type=Path)
     args = parser.parse_args()
     try:
@@ -135,6 +144,21 @@ def main():
                                          sample_count=args.samples, repeats=args.repeats, timeout=args.timeout_seconds)
             print(json.dumps(report, ensure_ascii=False))
             return 1 if report["best_concurrency"] is None else 0
+        if args.command == "recover-timeouts":
+            from contextlib import closing
+
+            from .state import State
+            from .timeout_recovery import recover_timeouts
+
+            if args.workers < 1 or not args.state_db.is_file():
+                raise ValueError("Recovery requires positive --workers and an existing --state-db")
+            with closing(State(args.state_db, initialize=False)) as state:
+                report = recover_timeouts(
+                    state, contract, args.run_id, args.stage.replace("-", "_"), args.attempt_dir,
+                    args.annotator_lock, args.reviewer_lock, args.workers,
+                )
+            print(json.dumps(report, ensure_ascii=False))
+            return int(bool(report["failed"]))
         if args.command in {"annotate", "review-labels", "generate-qa", "review-qa"}:
             from . import pilot
             from .state import State

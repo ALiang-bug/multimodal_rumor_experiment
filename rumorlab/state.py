@@ -123,6 +123,37 @@ class State:
             self.db.execute("BEGIN IMMEDIATE")
             return sum(self._register_job(*job)[1] for job in jobs)
 
+    def register_timeout_recovery(self, jobs, timeout_seconds):
+        with self.db:
+            self.db.execute("BEGIN IMMEDIATE")
+            for spec, previous_id in jobs:
+                job_id, created = self._register_job(*spec)
+                if previous_id is None:
+                    continue
+                if created or job_id != previous_id:
+                    raise ValueError(f"Timeout recovery request changed: {previous_id}")
+                state = self.db.execute("SELECT state FROM jobs WHERE id = ?", (job_id,)).fetchone()[0]
+                if state == "STALE":
+                    raise ValueError(f"Cannot recover stale job: {job_id}")
+                if state != "FAILED":
+                    continue
+                events = self.db.execute(
+                    """SELECT state, detail FROM events WHERE job_id = ?
+                       AND state IN ('QUEUED', 'FAILED') ORDER BY sequence DESC""", (job_id,),
+                ).fetchall()
+                if any(row["state"] == "QUEUED" and json.loads(row["detail"]).get("timeout_recovery")
+                       for row in events):
+                    continue
+                failure = json.loads(events[0]["detail"]).get("error") if events else None
+                if not failure or failure.get("category") != "technical" or (
+                    (failure.get("response") or {}).get("technical_error") != "TimeoutError"
+                ):
+                    raise ValueError(f"Job has no terminal timeout to recover: {job_id}")
+                self.db.execute(
+                    "UPDATE jobs SET state = 'QUEUED', technical_retries = 0 WHERE id = ?", (job_id,),
+                )
+                self._event(job_id, "QUEUED", {"timeout_recovery": timeout_seconds})
+
     def claim(self, stage, subject, task, input_hash, dependencies, lease_seconds):
         with self.db:
             self.db.execute("BEGIN IMMEDIATE")
