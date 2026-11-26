@@ -71,7 +71,7 @@ def _can_resume_revision(contract, pinned, current):
         return False
     allowed = {"rumorlab/state.py", "rumorlab/pipeline.py", "rumorlab/pilot.py", "rumorlab/cli.py",
                "rumorlab/requests.py", "rumorlab/vllm.py", "rumorlab/provenance.py", "scripts/run_val100_baseline.sh",
-               "rumorlab/timeout_recovery.py", "scripts/recover_val_timeouts.sh"}
+               "rumorlab/timeout_recovery.py", "rumorlab/restore_val.py", "scripts/recover_val_timeouts.sh"}
     while current != pinned:
         metadata = git("log", "-1", "--format=%P%n%(trailers:key=Runtime-Resume-From,valueonly)", current)
         fields = metadata.stdout.split()

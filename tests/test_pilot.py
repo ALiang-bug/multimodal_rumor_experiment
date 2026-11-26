@@ -1,4 +1,4 @@
-from contextlib import redirect_stderr, redirect_stdout
+from contextlib import closing, redirect_stderr, redirect_stdout
 from io import StringIO
 import json
 from pathlib import Path
@@ -21,6 +21,7 @@ from rumorlab.provenance import prepare_source_tasks, save_source_tasks
 from rumorlab.qa import solver_projection
 from rumorlab.records import record_envelope, stage_record
 from rumorlab.requests import build_request
+from rumorlab.restore_val import restore_val
 from rumorlab.snapshot import snapshot_records
 from rumorlab.state import LeaseLost, State
 from rumorlab.validation import validate_rows
@@ -445,6 +446,53 @@ class SingleLabelAnnotateTests(PilotFixture, TestCase):
         self.assertEqual(record["status"], "VALIDATED")
         self.assertEqual(record["label_schema_version"], "2.0.0")
         self.assertEqual(record["producer"]["prompt_version"], "1.2.0")
+
+
+class RestoreValTests(PilotFixture, TestCase):
+    config_path = SINGLE_LABEL_CONFIG
+
+    def test_restores_baseline_and_reuses_verifiable_recovery_cache(self):
+        def annotate(body, timed_out=True):
+            properties = body["response_format"]["json_schema"]["schema"]["properties"]
+            task = properties["task_id"]["const"]
+            if timed_out and task == "reality_plausibility":
+                raise TimeoutError
+            sample = next(s for s in self.samples if s["target_claims"][0] == properties["target_claim"]["const"])
+            return self.payload(task, sample)
+
+        def review(body):
+            schema = body["response_format"]["json_schema"]["schema"]
+            task = schema["properties"]["suggested_annotation"]["anyOf"][0]["properties"]["task_id"]["const"]
+            if task == "image_text_consistency":
+                raise TimeoutError
+            return PASS_REVIEW
+
+        with self.transport(annotate):
+            self.save_attempt("annotate", self.command("annotate", expected=1))
+        with self.transport(review):
+            self.save_attempt("review-labels", self.command("review-labels", expected=1))
+        baseline = self.export()
+        (self.root / "snapshot.jsonl").write_text(
+            "".join(json.dumps(row) + "\n" for row in baseline), encoding="utf-8",
+        )
+        with self.transport(lambda body: annotate(body, timed_out=False)):
+            self.recover_timeouts("annotate")
+        restored_path = self.root / "restored.sqlite3"
+        unreadable = self.root / "unreadable.sqlite3"
+        unreadable.write_bytes(b"not a SQLite database")
+        restored = restore_val(self.contract, self.db_path, self.root, restored_path, RUN,
+                               salvage=(unreadable, self.db_path))
+        self.assertEqual((restored["baseline_records"], restored["reused_recovery_jobs"],
+                          restored["remaining_original_timeouts"], restored["integrity_check"]), (7, 1, 1, "ok"))
+        with closing(State(restored_path, initialize=False)) as restored_state:
+            self.assertEqual(snapshot_records(restored_state, RUN), baseline)
+        self.db_path = restored_path
+        with self.transport(lambda _: self.fail("Recovered annotate job must hit cache")):
+            annotation = self.recover_timeouts("annotate")
+        self.assertEqual(annotation["cached"], 1)
+        with self.transport(lambda _: PASS_REVIEW):
+            reviewed = self.recover_timeouts("review-labels")
+        self.assertEqual((reviewed["original_timeouts"], reviewed["new_candidates"], reviewed["failed"]), (1, 1, 0))
 
 
 class LabelFixture(PilotFixture):
