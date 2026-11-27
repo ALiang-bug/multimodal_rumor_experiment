@@ -12,6 +12,7 @@ from .validation import canonical_hash
 DATASET = "MMFakeBench"
 SOURCE_SPLITS = {"MMFakeBench_test": "test", "MMFakeBench_val": "dev"}
 PREFIX_METHOD = "source-prefix-v1"
+STRATIFIED_METHOD = "proportional-sha256-v1"
 VERACITY = {"true": "real", "real": "real", "fake": "fake"}
 USAGE_PROTOCOL = "https://huggingface.co/datasets/liuxuannan/MMFakeBench/blob/main/README.md"
 
@@ -156,7 +157,7 @@ def prepare_mmfakebench(path, media_root, seed, sample_size=None, *, first_n=Non
         rows.sort(key=lambda row: row[0])
         selection.sort(key=lambda item: item["source_row"])
     manifest = {
-        "adapter": "mmfakebench", "method": PREFIX_METHOD if first_n is not None else "proportional-sha256-v1",
+        "adapter": "mmfakebench", "method": PREFIX_METHOD if first_n is not None else STRATIFIED_METHOD,
         "seed": seed,
         "annotation_filename": path.name, "annotation_sha256": source_hash, "source_split": name,
         "assigned_split": source_split, "input_rows": len(raw_rows), "unique_source_rows": population,

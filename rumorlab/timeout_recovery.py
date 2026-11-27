@@ -74,7 +74,7 @@ def _recover_batches(state, contract, run_id, stage, baseline, annotator_lock, r
     started = monotonic()
     role = "annotator" if stage == "annotate" else "reviewer"
     source, sampling, records, samples, evidence = pilot._inputs(
-        state.db, run_id, allow_test_prefix=annotation is None,
+        state.db, run_id, allow_test=annotation is None,
     )
     plan = state.db.execute("SELECT * FROM split_plans WHERE run_id = ?", (run_id,)).fetchone()
     if plan is None:

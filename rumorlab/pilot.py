@@ -12,7 +12,7 @@ from time import monotonic
 
 from .grouping import apply_plan, freeze_plan
 from .m1 import connect_role, load_lock
-from .mmfakebench import PREFIX_METHOD
+from .mmfakebench import PREFIX_METHOD, STRATIFIED_METHOD
 from .pipeline import JobFailed, execute, model_job_spec
 from .provenance import prepare_source_tasks, save_source_tasks
 from .qa import solver_projection
@@ -23,7 +23,7 @@ from .state import State
 from .validation import ID_FIELDS, canonical_hash
 
 
-def _inputs(db, run_id, *, allow_test_prefix=False):
+def _inputs(db, run_id, *, allow_test=False):
     row = db.execute(
         """SELECT imports.*, import_manifests.manifest FROM imports
            JOIN import_manifests USING(run_id) WHERE run_id = ?""", (run_id,),
@@ -33,17 +33,24 @@ def _inputs(db, run_id, *, allow_test_prefix=False):
     source = json.loads(row["manifest"])
     source_split = source["assigned_split"]
     origin = (source["adapter"], source["source_split"], source_split)
-    test_prefix = (allow_test_prefix and origin == ("mmfakebench", "MMFakeBench_test", "test")
-                   and source.get("method") == PREFIX_METHOD)
-    if origin != ("mmfakebench", "MMFakeBench_val", "dev") and not test_prefix:
-        raise ValueError("Pilot accepts only MMFakeBench val (dev) or an explicitly frozen test prefix for labels")
+    test = (allow_test and origin == ("mmfakebench", "MMFakeBench_test", "test")
+            and source.get("method") in {PREFIX_METHOD, STRATIFIED_METHOD})
+    if origin != ("mmfakebench", "MMFakeBench_val", "dev") and not test:
+        raise ValueError("Pilot accepts only MMFakeBench val (dev) or a frozen MMFakeBench test selection for labels")
     records = json.loads(row["records"])
     samples = {item["sample_id"]: item for item in records if item["record_type"] == "sample"}
     if not samples or any(item["is_mock"] or item["split"] != source_split for item in samples.values()):
         raise ValueError(f"Pilot requires real {source_split} samples")
-    if test_prefix and (len(samples) != source["sample_size"] or
-                        [item["source_row"] for item in source["selection"]] != list(range(1, len(samples) + 1))):
-        raise ValueError("MMFakeBench test selection must be a contiguous source prefix")
+    if test:
+        selection = source["selection"]
+        source_rows = [item["source_row"] for item in selection]
+        if (len(selection) != len(samples) or len(samples) != source["sample_size"]
+                or {item["sample_id"] for item in selection} != samples.keys()
+                or len(set(source_rows)) != len(samples)
+                or any(not 1 <= number <= source["input_rows"] for number in source_rows)):
+            raise ValueError("MMFakeBench test selection and frozen import disagree")
+        if source["method"] == PREFIX_METHOD and source_rows != list(range(1, len(samples) + 1)):
+            raise ValueError("MMFakeBench test selection must be a contiguous source prefix")
     evidence = {item["evidence_id"]: item for item in records if item["record_type"] == "evidence"}
     return row, source, records, samples, evidence
 
@@ -319,7 +326,7 @@ def _ordered_sample_ids(source, samples, seed, *, subset):
 def annotate_batches(state, contract, run_id, batches, annotator_lock, reviewer_lock, *, workers,
                      before_dispatch=None):
     started = monotonic()
-    row, source, records, samples, evidence = _inputs(state.db, run_id, allow_test_prefix=True)
+    row, source, records, samples, evidence = _inputs(state.db, run_id, allow_test=True)
     sample_ids = _ordered_sample_ids(source, samples, contract.experiment["seed"],
                                      subset=len(batches) != 1 or batches[0][2] < len(samples))
     tasks = contract.experiment["annotation"]["model_tasks"]
@@ -432,7 +439,7 @@ def review_label_batches(state, contract, run_id, batch_ids, reviewer_lock, *, w
     started = monotonic()
     if len(set(batch_ids)) != len(batch_ids):
         raise ValueError("Review batch IDs must be distinct")
-    row, _, _, samples, evidence = _inputs(state.db, run_id, allow_test_prefix=True)
+    row, _, _, samples, evidence = _inputs(state.db, run_id, allow_test=True)
     _, lock_hash = load_lock(contract, "reviewer", reviewer_lock)
     execution_revision = _code_revision(contract)
     selections = []
