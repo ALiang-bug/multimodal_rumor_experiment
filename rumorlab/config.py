@@ -6,7 +6,7 @@ from pathlib import Path
 import jsonschema
 import yaml
 
-from . import prompts_v1_2
+from . import prompts_v1_2, prompts_v1_3
 from .validation import canonical_hash
 
 
@@ -32,7 +32,8 @@ class Contract:
         self.labels = load_yaml(self.root / self.experiment["label_config"])
         self.models = load_yaml(self.root / self.experiment["model_config"])
         self.schema = json.loads((self.root / self.experiment["record_schema"]).read_text(encoding="utf-8"))
-        self.single_label = self.experiment["annotation"]["prompt_version"] == prompts_v1_2.VERSION
+        self.label_prompt_version = self.experiment["annotation"]["prompt_version"]
+        self.single_label = self.label_prompt_version in {prompts_v1_2.VERSION, prompts_v1_3.VERSION}
         if self.single_label:
             self._apply_single_label_contract()
         jsonschema.Draft202012Validator.check_schema(self.schema)

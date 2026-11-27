@@ -23,7 +23,7 @@ def _measure(client, requests, concurrency, seed):
         result, _ = client.complete(request, seed=seed)
         if not result.schema_valid:
             return result, result.technical_error or f"invalid_response:{result.finish_reason}"
-        if request.task_id != "reality_plausibility" and result.parsed_payload["applicability"] != "applicable":
+        if request.task_id != "reality_plausibility" and result.parsed_payload.get("applicability", "applicable") != "applicable":
             return result, "invalid_applicability"
         return result, None
 

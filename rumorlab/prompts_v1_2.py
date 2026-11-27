@@ -97,7 +97,7 @@ def task_guide(task_id):
     return f"{task['guide']}\n\nAllowed labels\n{labels}"
 
 
-def label_messages(stage, values):
+def label_messages(stage, values, *, roles=ROLES, common=COMMON):
     fields = [
         values["task_instructions"],
         f"Fixed target: {values['target_claim_json']}",
@@ -106,4 +106,4 @@ def label_messages(stage, values):
     if stage == "review_labels":
         fields.append(f"Candidate annotation: {values['candidate_annotation_json']}")
     fields.append(f"Response schema: {values['response_schema_json']}")
-    return ("system", f"{ROLES[stage]}\n\n{COMMON}"), ("user", "\n\n".join(fields))
+    return ("system", f"{roles[stage]}\n\n{common}"), ("user", "\n\n".join(fields))

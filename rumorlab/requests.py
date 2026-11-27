@@ -6,7 +6,7 @@ import json
 
 from jinja2 import Environment, FileSystemLoader, StrictUndefined
 
-from . import prompts_v1_2
+from . import prompts_v1_2, prompts_v1_3
 from .validation import canonical_hash
 
 
@@ -88,10 +88,17 @@ def _response_schema(contract, definition, task_id):
     return expand(definitions[definition])
 
 
+def _omit_fields(schema, *fields):
+    for field in fields:
+        del schema["properties"][field]
+        schema["required"].remove(field)
+
+
 def build_request(contract, stage, task_id, sample, claim, evidence, media_root, *, upstream=None, material=None):
     role, definition = DEFINITIONS[stage]
     if claim not in sample["target_claims"]:
         raise ValueError("Claim is outside the sample")
+    revised = contract.label_prompt_version == prompts_v1_3.VERSION and stage in prompts_v1_3.ROLES
     solver = stage in {"generate_qa", "review_qa"}
     material, images = (visible_material(sample, evidence, media_root, solver=solver)
                         if material is None else material)
@@ -104,11 +111,21 @@ def build_request(contract, stage, task_id, sample, claim, evidence, media_root,
         )
     if stage == "annotate":
         schema["properties"]["target_claim"] = {"const": claim}
+        if revised:
+            _omit_fields(schema, "applicability", "unknown_reason")
     elif stage == "review_labels":
         properties = schema["properties"]
-        suggested = properties["suggested_annotation"]["anyOf"][0]["properties"]
-        suggested["evidence_ids"] = properties["evidence_ids"]
-        suggested["target_claim"] = {"const": claim}
+        suggested = properties["suggested_annotation"]["anyOf"][0]
+        suggested["properties"]["evidence_ids"] = properties["evidence_ids"]
+        suggested["properties"]["target_claim"] = {"const": claim}
+        if revised:
+            _omit_fields(suggested, "applicability", "unknown_reason")
+            _omit_fields(schema, "suggested_qa_revision")
+            properties["issue_codes"]["items"]["enum"] = [
+                "LABEL_ERROR", "EVIDENCE_MISSING", "EVIDENCE_UNSUPPORTED",
+                "CLAIM_AMBIGUOUS", "FORMAT_ERROR", "OTHER_QUALITY_ISSUE",
+            ]
+            del schema["allOf"][0]["then"]["properties"]["suggested_qa_revision"]
     elif stage == "review_qa":
         schema["properties"]["suggested_annotation"] = {"type": "null"}
     environment = Environment(
@@ -119,7 +136,8 @@ def build_request(contract, stage, task_id, sample, claim, evidence, media_root,
     versioned_guide = contract.single_label and task_id in prompts_v1_2.TASKS
     values = {
         "task_id": task_id,
-        "task_instructions": (prompts_v1_2.task_guide(task_id) if versioned_guide else
+        "task_instructions": (prompts_v1_3.TASKS[task_id] if revised else
+                              prompts_v1_2.task_guide(task_id) if versioned_guide else
                               environment.loader.get_source(environment, f"tasks/{task_id}.txt")[0]),
         "single_label": contract.single_label,
         "task_definition_json": {
@@ -139,7 +157,10 @@ def build_request(contract, stage, task_id, sample, claim, evidence, media_root,
         if expected == "annotation_payload" and payload["target_claim"] != claim:
             raise ValueError("Upstream claim does not match the request")
         if stage == "review_labels":
-            values["candidate_annotation_json"] = payload
+            values["candidate_annotation_json"] = (
+                {field: payload[field] for field in ("labels", "rationale", "evidence_ids")}
+                if revised else payload
+            )
         elif stage == "generate_qa":
             if upstream["status"] not in {"ACCEPTED_SILVER", "ACCEPTED_GOLD"}:
                 raise ValueError("QA generation requires an accepted annotation")
@@ -157,10 +178,17 @@ def build_request(contract, stage, task_id, sample, claim, evidence, media_root,
             })
     rendered = {key: json.dumps(value, ensure_ascii=False, sort_keys=True)
                 if key.endswith("_json") else value for key, value in values.items()}
-    messages = prompts_v1_2.label_messages(stage, rendered) if versioned_guide and stage in prompts_v1_2.ROLES else (
-        ("system", environment.get_template("system.txt").render(role=role)),
-        ("user", environment.get_template(f"{stage}.j2").render(**rendered)),
-    )
+    if revised:
+        messages = prompts_v1_2.label_messages(
+            stage, rendered, roles=prompts_v1_3.ROLES, common=prompts_v1_3.COMMON,
+        )
+    elif versioned_guide and stage in prompts_v1_2.ROLES:
+        messages = prompts_v1_2.label_messages(stage, rendered)
+    else:
+        messages = (
+            ("system", environment.get_template("system.txt").render(role=role)),
+            ("user", environment.get_template(f"{stage}.j2").render(**rendered)),
+        )
     prompt_hash = canonical_hash(messages)
     model_hash = canonical_hash(contract.models["models"][role])
     request_id = canonical_hash([stage, task_id, material, schema, prompt_hash, model_hash, contract.config_hash])

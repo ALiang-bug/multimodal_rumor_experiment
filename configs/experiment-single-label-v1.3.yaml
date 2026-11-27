@@ -1,0 +1,10 @@
+base_experiment: configs/experiment.yaml
+experiment_id: multimodal_rumor_single_label_v1_3
+annotation:
+  prompt_version: "1.3.0"
+  persuasion_mode: single_dominant_strategy
+qa:
+  prompt_version: "1.2.0"
+  persuasion_default_type: single_choice
+  require_all_correct_strategies_in_options: false
+  unknown_question_requires_explicit_answerability: false

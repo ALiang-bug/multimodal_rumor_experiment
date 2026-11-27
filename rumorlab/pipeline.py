@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 import json
 from pathlib import Path
 
+from . import prompts_v1_3
 from .models import MockModel
 from .grouping import apply_plan, freeze_plan
 from .provenance import run_source_tasks
@@ -56,6 +57,16 @@ def execute(state, contract, request, subject, dependencies, client, *, script_h
                     payload = response.parsed_payload
                 else:
                     payload = response.parsed_payload
+                    if contract.label_prompt_version == prompts_v1_3.VERSION:
+                        # The label-stage response omits fields fixed by the stored record contract.
+                        if request.stage == "annotate":
+                            payload = dict(payload, applicability="applicable", unknown_reason=None)
+                        elif request.stage == "review_labels":
+                            payload = dict(payload, suggested_qa_revision=None)
+                            if payload["suggested_annotation"] is not None:
+                                payload["suggested_annotation"] = dict(
+                                    payload["suggested_annotation"], applicability="applicable", unknown_reason=None,
+                                )
                     visible = {item["evidence_id"] for item in request.visible_inputs["evidence"]}
                     suggested = payload.get("suggested_annotation")
                     cites = set(payload["evidence_ids"])

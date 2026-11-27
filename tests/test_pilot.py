@@ -964,3 +964,71 @@ class ReviewQATests(QAFixture, TestCase):
         self.assertEqual(approved["status"], "ACCEPTED_SILVER")
         self.assertEqual(approved["payload"], payload)
         self.assertEqual(review["target_content_hash"], question["content_hash"])
+
+
+
+class RevisedAnnotateTests(PilotFixture, TestCase):
+    config_path = ROOT / "configs/experiment-single-label-v1.3.yaml"
+
+    def test_revised_prompt_and_record_compatibility(self):
+        def reply(body):
+            schema = body["response_format"]["json_schema"]["schema"]
+            payload = self.payload(schema["properties"]["task_id"]["const"])
+            del payload["applicability"]
+            del payload["unknown_reason"]
+            messages = json.dumps(body["messages"])
+            self.assertIn("Make an independent judgment", messages)
+            self.assertIn("**Final decision.**", messages)
+            for field in ("applicability", "unknown_reason"):
+                self.assertNotIn(field, messages)
+                self.assertNotIn(field, schema["properties"])
+            return payload
+
+        with self.transport(reply):
+            report = self.command("annotate")
+        self.assertEqual(report["failed"], 0)
+        annotations = [row for row in self.export()
+                       if row["record_type"] == "annotation" and row["producer"]["kind"] == "model"]
+        self.assertEqual(len(annotations), 4)
+        for row in annotations:
+            self.assertEqual(row["producer"]["prompt_version"], "1.3.0")
+            self.assertEqual(row["payload"]["applicability"], "applicable")
+            self.assertIsNone(row["payload"]["unknown_reason"])
+
+
+class RevisedReviewTests(LabelFixture, TestCase):
+    config_path = RevisedAnnotateTests.config_path
+
+    def test_revised_review_projects_candidate_and_preserves_record_contract(self):
+        first, second = self.seed_annotations("image_text_consistency", "persuasion_strategy")
+
+        def reply(body):
+            schema = body["response_format"]["json_schema"]["schema"]
+            task = schema["properties"]["suggested_annotation"]["anyOf"][0]["properties"]["task_id"]["const"]
+            messages = json.dumps(body["messages"])
+            self.assertIn("Identify the decisive cue in the original material", messages)
+            self.assertIn("Fixture rationale.", messages)
+            self.assertNotIn("QA_WRONG_ANSWER", messages)
+            self.assertNotIn("APPLICABILITY_ERROR", messages)
+            for field in ("applicability", "unknown_reason", "suggested_qa_revision"):
+                self.assertNotIn(field, messages)
+                self.assertNotIn(field, json.dumps(schema))
+            result = {key: value for key, value in PASS_REVIEW.items() if key != "suggested_qa_revision"}
+            if task == "persuasion_strategy":
+                suggestion = {key: value for key, value in second["payload"].items()
+                              if key not in {"applicability", "unknown_reason"}}
+                suggestion["rationale"] = "Synthetic revised rationale."
+                result.update(decision="NEEDS_HUMAN", issue_codes=["EVIDENCE_MISSING"],
+                              suggested_annotation=suggestion)
+            return result
+
+        with self.transport(reply):
+            report = self.command("review-labels")
+        self.assertEqual(report["failed"], 0)
+        reviews = {row["target_id"]: row for row in self.export() if row["record_type"] == "review"}
+        self.assertEqual(reviews[first["annotation_id"]]["payload"]["decision"], "PASS")
+        reviewed = reviews[second["annotation_id"]]["payload"]
+        self.assertEqual(reviewed["decision"], "NEEDS_HUMAN")
+        self.assertIsNone(reviewed["suggested_qa_revision"])
+        self.assertEqual(reviewed["suggested_annotation"]["applicability"], "applicable")
+        self.assertIsNone(reviewed["suggested_annotation"]["unknown_reason"])
